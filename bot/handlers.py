@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from typing import Optional
 
@@ -11,7 +10,6 @@ from .keyboards import (
     timeframe_keyboard,
     market_list_keyboard,
     order_type_keyboard,
-    side_keyboard,
     confirm_keyboard,
     portfolio_keyboard,
     back_keyboard,
@@ -23,30 +21,39 @@ from .formatters import (
     format_positions,
     format_history,
     format_order_result,
-    format_pnl,
 )
 
 logger = logging.getLogger(__name__)
-
-TIMEFRAMES = {
-    "5m": "5 Minutes",
-    "15m": "15 Minutes",
-    "1h": "Hourly",
-    "1d": "Daily",
-}
 
 
 def _derive_address(private_key: str) -> str:
     try:
         from eth_account import Account
-        acct = Account.from_key(private_key)
-        return acct.address
+        return Account.from_key(private_key).address
     except Exception:
         return ""
 
 
 def get_client(context: ContextTypes.DEFAULT_TYPE):
     return context.application.bot_data["client"]
+
+
+def is_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    allowed_id = str(context.application.bot_data["config"].get("chat_id", "")).strip()
+    if not allowed_id:
+        return False
+    user_id = str(update.effective_user.id) if update.effective_user else ""
+    return user_id == allowed_id
+
+
+async def reject(update: Update) -> None:
+    logger.warning(
+        f"Unauthorized access attempt from user_id={update.effective_user.id if update.effective_user else 'unknown'}"
+    )
+    if update.message:
+        await update.message.reply_text("⛔ You are not authorized to use this bot.")
+    elif update.callback_query:
+        await update.callback_query.answer("⛔ Unauthorized.", show_alert=True)
 
 
 def get_session(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> dict:
@@ -57,6 +64,9 @@ def get_session(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> dict:
 
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update, context):
+        await reject(update)
+        return
     user = update.effective_user
     text = (
         f"👋 Welcome, <b>{user.first_name}</b>!\n\n"
@@ -72,6 +82,9 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update, context):
+        await reject(update)
+        return
     await update.message.reply_text(
         "📋 <b>Main Menu</b>",
         parse_mode=ParseMode.HTML,
@@ -80,6 +93,9 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def market_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update, context):
+        await reject(update)
+        return
     await update.message.reply_text(
         "📊 <b>Market Browser</b>\n\nSelect a timeframe to browse active markets:",
         parse_mode=ParseMode.HTML,
@@ -88,6 +104,9 @@ async def market_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def order_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update, context):
+        await reject(update)
+        return
     user_id = update.effective_user.id
     session = get_session(context, user_id)
     if not session.get("selected_market"):
@@ -100,6 +119,9 @@ async def order_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def portfolio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update, context):
+        await reject(update)
+        return
     client = get_client(context)
     config = context.application.bot_data["config"]
     msg = await update.message.reply_text("⏳ Loading portfolio...")
@@ -117,6 +139,9 @@ async def portfolio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update, context):
+        await reject(update)
+        return
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -183,13 +208,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             markets_data = await client.get_active_markets(limit=20)
             markets = markets_data.get("data", [])
-            interval_labels = {"5m": "5 Min", "15m": "15 Min", "1h": "Hourly", "1d": "Daily"}
-            category_filter = {
-                "5m": "5 Min",
-                "15m": "15 Min",
-                "1h": "Hourly",
-                "1d": "Daily",
-            }
+            category_filter = {"5m": "5 min", "15m": "15 min", "1h": "hourly", "1d": "daily"}
             target_label = category_filter.get(timeframe, "").lower()
             if target_label:
                 filtered = [
@@ -202,7 +221,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 filtered = markets
             filtered = filtered[:20]
             session["market_list"] = filtered
-            tf_label = interval_labels.get(timeframe, timeframe)
+            tf_labels = {"5m": "5 Min", "15m": "15 Min", "1h": "Hourly", "1d": "Daily"}
+            tf_label = tf_labels.get(timeframe, timeframe)
             await query.edit_message_text(
                 f"📊 <b>Active Markets — {tf_label}</b>\n\nSelect a market:",
                 parse_mode=ParseMode.HTML,
@@ -256,7 +276,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("trade_"):
         parts = data.split("_")
-        action = parts[1]
         outcome = parts[2]
         slug = "_".join(parts[3:])
         session["trade_side"] = "BUY"
@@ -268,9 +287,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order_type = data[10:]
         session["order_type"] = order_type
         slug = session.get("selected_market", "")
-        market_data = session.get("market_data", {})
         outcome = session.get("trade_outcome", "YES")
-
         if order_type == "FOK":
             session["awaiting_input"] = "maker_amount"
             await query.edit_message_text(
@@ -298,17 +315,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "cancel_order":
         session.pop("pending_order", None)
         session.pop("awaiting_input", None)
-        await query.edit_message_text(
-            "❌ Order cancelled.",
-            reply_markup=main_menu_keyboard(),
-        )
+        await query.edit_message_text("❌ Order cancelled.", reply_markup=main_menu_keyboard())
 
     elif data.startswith("cancel_order_id_"):
         order_id = data[16:]
         await query.edit_message_text("⏳ Cancelling order...")
         client = get_client(context)
         try:
-            result = await client.cancel_order(order_id)
+            await client.cancel_order(order_id)
             await query.edit_message_text("✅ Order cancelled successfully.", reply_markup=back_keyboard())
         except Exception as e:
             logger.error(f"Cancel order error: {e}")
@@ -338,14 +352,12 @@ async def _show_order_type(update: Update, context: ContextTypes.DEFAULT_TYPE, e
     session = get_session(context, user_id)
     slug = session.get("selected_market", "unknown")
     outcome = session.get("trade_outcome", "YES")
-
     text = (
         f"📋 <b>Place Order</b>\n\n"
         f"Market: <code>{slug}</code>\n"
         f"Outcome: <b>{outcome}</b>\n\n"
         f"Select order type:"
     )
-
     if edit and query:
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=order_type_keyboard())
     else:
@@ -353,15 +365,15 @@ async def _show_order_type(update: Update, context: ContextTypes.DEFAULT_TYPE, e
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update, context):
+        await reject(update)
+        return
     user_id = update.effective_user.id
     session = get_session(context, user_id)
     awaiting = session.get("awaiting_input")
 
     if not awaiting:
-        await update.message.reply_text(
-            "Use /menu to open the main menu.",
-            reply_markup=main_menu_keyboard(),
-        )
+        await update.message.reply_text("Use /menu to open the main menu.", reply_markup=main_menu_keyboard())
         return
 
     text = update.message.text.strip()
@@ -407,12 +419,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _show_order_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     session = get_session(context, user_id)
-
     slug = session.get("selected_market")
     outcome = session.get("trade_outcome", "YES")
     order_type = session.get("order_type", "GTC")
     side = session.get("trade_side", "BUY")
-
     if order_type == "FOK":
         amount = session.get("trade_maker_amount", 0)
         details = f"Amount: <b>{amount} USDC</b>"
@@ -420,7 +430,6 @@ async def _show_order_confirmation(update: Update, context: ContextTypes.DEFAULT
         price = session.get("trade_price", 0)
         size = session.get("trade_size", 0)
         details = f"Price: <b>{price}</b>\nSize: <b>{size} contracts</b>"
-
     text = (
         f"✅ <b>Confirm Order</b>\n\n"
         f"Market: <code>{slug}</code>\n"
@@ -430,33 +439,24 @@ async def _show_order_confirmation(update: Update, context: ContextTypes.DEFAULT
         f"{details}\n\n"
         f"Do you want to place this order?"
     )
-
-    await update.message.reply_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=confirm_keyboard(),
-    )
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=confirm_keyboard())
 
 
 async def _execute_order(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
     user_id = update.effective_user.id
     session = get_session(context, user_id)
     client = get_client(context)
-
     slug = session.get("selected_market")
     outcome = session.get("trade_outcome", "YES")
     order_type = session.get("order_type", "GTC")
     side = session.get("trade_side", "BUY")
-
     if query:
         await query.edit_message_text("⏳ Placing order...")
-
     try:
         market_data = session.get("market_data")
         if not market_data:
             market_data = await client.get_market(slug)
             session["market_data"] = market_data
-
         tokens = market_data.get("tokens", market_data.get("positionIds", {}))
         if isinstance(tokens, dict):
             token_id = tokens.get("yes" if outcome == "YES" else "no", "")
@@ -464,30 +464,22 @@ async def _execute_order(update: Update, context: ContextTypes.DEFAULT_TYPE, que
             token_id = tokens[0] if outcome == "YES" else (tokens[1] if len(tokens) > 1 else tokens[0])
         else:
             token_id = str(tokens)
-
         payload = {
             "marketSlug": slug,
             "orderType": order_type,
-            "args": {
-                "tokenId": token_id,
-                "side": side,
-            },
+            "args": {"tokenId": token_id, "side": side},
         }
-
         if order_type == "FOK":
             payload["args"]["makerAmount"] = session.get("trade_maker_amount")
         else:
             payload["args"]["price"] = session.get("trade_price")
             payload["args"]["size"] = session.get("trade_size")
-
         result = await client.create_order(payload)
         text = format_order_result(result, slug, outcome, order_type)
-
         if query:
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=main_menu_keyboard())
         else:
             await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=main_menu_keyboard())
-
     except Exception as e:
         logger.error(f"Order execution error: {e}")
         error_text = f"❌ Order failed: {str(e)[:200]}"
