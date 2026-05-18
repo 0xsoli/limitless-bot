@@ -49,19 +49,6 @@ def get_client(context: ContextTypes.DEFAULT_TYPE):
     return context.application.bot_data["client"]
 
 
-def is_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    allowed_id = str(context.application.bot_data["config"].get("chat_id", ""))
-    user_id = str(update.effective_user.id if update.effective_user else "")
-    return allowed_id and user_id == allowed_id
-
-
-async def unauthorized_response(update: Update) -> None:
-    if update.message:
-        await update.message.reply_text("⛔ Unauthorized.")
-    elif update.callback_query:
-        await update.callback_query.answer("⛔ Unauthorized.", show_alert=True)
-
-
 def get_session(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> dict:
     sessions = context.application.bot_data.setdefault("user_sessions", {})
     if user_id not in sessions:
@@ -70,9 +57,7 @@ def get_session(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> dict:
 
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update, context):
-        await unauthorized_response(update)
-        return
+    user = update.effective_user
     text = (
         f"👋 Welcome, <b>{user.first_name}</b>!\n\n"
         "🏦 <b>Limitless Exchange Trading Bot</b>\n\n"
@@ -87,9 +72,6 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update, context):
-        await unauthorized_response(update)
-        return
     await update.message.reply_text(
         "📋 <b>Main Menu</b>",
         parse_mode=ParseMode.HTML,
@@ -98,9 +80,6 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def market_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update, context):
-        await unauthorized_response(update)
-        return
     await update.message.reply_text(
         "📊 <b>Market Browser</b>\n\nSelect a timeframe to browse active markets:",
         parse_mode=ParseMode.HTML,
@@ -109,9 +88,7 @@ async def market_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def order_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update, context):
-        await unauthorized_response(update)
-        return
+    user_id = update.effective_user.id
     session = get_session(context, user_id)
     if not session.get("selected_market"):
         await update.message.reply_text(
@@ -123,9 +100,7 @@ async def order_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def portfolio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update, context):
-        await unauthorized_response(update)
-        return
+    client = get_client(context)
     config = context.application.bot_data["config"]
     msg = await update.message.reply_text("⏳ Loading portfolio...")
     try:
@@ -142,9 +117,7 @@ async def portfolio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update, context):
-        await unauthorized_response(update)
-        return
+    query = update.callback_query
     await query.answer()
     data = query.data
     user_id = update.effective_user.id
@@ -380,9 +353,7 @@ async def _show_order_type(update: Update, context: ContextTypes.DEFAULT_TYPE, e
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update, context):
-        await unauthorized_response(update)
-        return
+    user_id = update.effective_user.id
     session = get_session(context, user_id)
     awaiting = session.get("awaiting_input")
 
