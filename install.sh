@@ -21,7 +21,7 @@ REPO_URL="https://github.com/0xsoli/limitless-bot"
 print_header() {
     echo ""
     echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}${BOLD}║     Limitless Trading Bot Installer by solixbt    ║${NC}"
+    echo -e "${CYAN}${BOLD}║    Limitless Trading Bot Installer by solixbt   ║${NC}"
     echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════════╝${NC}"
     echo ""
 }
