@@ -10,13 +10,8 @@ CHAIN_ID = 8453
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 SCALE = 1_000_000
 
-ORDER_TYPES = {
-    "EIP712Domain": [
-        {"name": "name", "type": "string"},
-        {"name": "version", "type": "string"},
-        {"name": "chainId", "type": "uint256"},
-        {"name": "verifyingContract", "type": "address"},
-    ],
+# EIP-712 Order type — matches https://docs.limitless.exchange/developers/eip712-signing
+ORDER_MESSAGE_TYPES = {
     "Order": [
         {"name": "salt", "type": "uint256"},
         {"name": "maker", "type": "address"},
@@ -77,6 +72,7 @@ def calculate_amounts(
 
 
 def sign_order(order_data: dict, verifying_contract: str, private_key: str) -> str:
+    """Sign order with EIP-712 using venue.exchange as verifyingContract."""
     domain = {
         "name": "Limitless CTF Exchange",
         "version": "1",
@@ -97,13 +93,13 @@ def sign_order(order_data: dict, verifying_contract: str, private_key: str) -> s
         "side": int(order_data["side"]),
         "signatureType": int(order_data["signatureType"]),
     }
+
+    # eth-account 0.11+ requires keyword arguments — a bare dict is treated as
+    # domain_data and raises "Invalid domain key: types".
     encoded = encode_typed_data(
-        {
-            "types": ORDER_TYPES,
-            "primaryType": "Order",
-            "domain": domain,
-            "message": message,
-        }
+        domain_data=domain,
+        message_types=ORDER_MESSAGE_TYPES,
+        message_data=message,
     )
     signed = Account.sign_message(encoded, private_key=private_key)
     signature = signed.signature.hex()
