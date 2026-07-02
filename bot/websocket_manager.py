@@ -1,5 +1,9 @@
 import asyncio
+import base64
+import hashlib
+import hmac
 import logging
+from datetime import datetime, timezone
 from typing import Callable, Optional
 
 import socketio
@@ -8,11 +12,13 @@ logger = logging.getLogger(__name__)
 
 WS_URL = "wss://ws.limitless.exchange"
 WS_NAMESPACE = "/markets"
+WS_AUTH_PATH = "/socket.io/?EIO=4&transport=websocket"
 
 
 class WebSocketManager:
-    def __init__(self, api_key: str, bot=None):
-        self._api_key = api_key
+    def __init__(self, token_id: str, secret: str, bot=None):
+        self._token_id = token_id
+        self._secret = secret
         self._bot = bot
         self._sio: Optional[socketio.AsyncClient] = None
         self._connected = False
@@ -21,6 +27,22 @@ class WebSocketManager:
         self._position_callbacks: list[Callable] = []
         self._order_callbacks: list[Callable] = []
         self._reconnect_task: Optional[asyncio.Task] = None
+
+    def _ws_auth_headers(self) -> dict:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        message = f"{timestamp}\nGET\n{WS_AUTH_PATH}\n"
+        signature = base64.b64encode(
+            hmac.new(
+                base64.b64decode(self._secret),
+                message.encode("utf-8"),
+                hashlib.sha256,
+            ).digest()
+        ).decode("utf-8")
+        return {
+            "lmts-api-key": self._token_id,
+            "lmts-timestamp": timestamp,
+            "lmts-signature": signature,
+        }
 
     async def connect(self):
         self._sio = socketio.AsyncClient(
@@ -45,8 +67,9 @@ class WebSocketManager:
         @self._sio.on("orderbookUpdate", namespace=WS_NAMESPACE)
         async def on_orderbook(data):
             slug = data.get("marketSlug", "")
+            orderbook = data.get("orderbook", data)
             if slug in self._orderbook_callbacks:
-                await self._orderbook_callbacks[slug](data)
+                await self._orderbook_callbacks[slug](orderbook)
 
         @self._sio.on("positions", namespace=WS_NAMESPACE)
         async def on_positions(data):
@@ -71,7 +94,7 @@ class WebSocketManager:
                 WS_URL,
                 namespaces=[WS_NAMESPACE],
                 transports=["websocket"],
-                headers={"X-API-Key": self._api_key},
+                headers=self._ws_auth_headers(),
             )
         except Exception as e:
             logger.error(f"WebSocket connection failed: {e}")
