@@ -160,6 +160,13 @@ def _format_generic_error(error: Exception, *, action: str) -> str:
             "Could not load your Limitless profile. Verify the API token belongs to an active account."
         )
 
+    if "invalid domain key" in lower:
+        return (
+            "❌ <b>Order signing failed</b>\n\n"
+            "The bot could not sign the order (EIP-712 error). "
+            "Update to the latest <code>bot/order_signer.py</code> from GitHub and redeploy."
+        )
+
     return (
         f"❌ <b>Could not {action}</b>\n\n"
         f"<code>{_escape_html(_truncate(message, 300))}</code>"
