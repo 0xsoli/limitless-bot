@@ -28,8 +28,16 @@ logger = logging.getLogger("limitless-bot")
 
 async def post_init(application: Application) -> None:
     config = application.bot_data["config"]
-    client = LimitlessClient(config["api_key"], config["api_secret"])
-    ws_manager = WebSocketManager(config["api_key"], application.bot)
+    client = LimitlessClient(
+        config["api_key"],
+        config["api_secret"],
+        config.get("wallet_private_key", ""),
+    )
+    ws_manager = WebSocketManager(
+        config["api_key"],
+        config["api_secret"],
+        application.bot,
+    )
     application.bot_data["client"] = client
     application.bot_data["ws_manager"] = ws_manager
     application.bot_data["active_markets"] = {}
