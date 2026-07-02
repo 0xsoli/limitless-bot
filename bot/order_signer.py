@@ -4,7 +4,7 @@ from typing import Optional
 
 from eth_account import Account
 from eth_account.messages import encode_typed_data
-from web3 import Web3
+from eth_utils import to_checksum_address
 
 CHAIN_ID = 8453
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
@@ -35,7 +35,7 @@ ORDER_TYPES = {
 
 
 def _checksum(address: str) -> str:
-    return Web3.to_checksum_address(address)
+    return to_checksum_address(address)
 
 
 def _generate_salt() -> int:
