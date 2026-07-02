@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://api.limitless.exchange"
 MIN_DELAY_BETWEEN_CALLS = 0.31
 MAX_CONCURRENT_REQUESTS = 2
+REQUEST_TIMEOUT_SECONDS = 30
+ORDER_TIMEOUT_SECONDS = 60
 
 PUBLIC_PREFIXES = (
     "/markets/active",
@@ -45,9 +47,10 @@ class RateLimiter:
 
 
 class LimitlessAPIError(Exception):
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, code: Optional[str] = None):
         self.status = status
         self.message = message
+        self.code = code
         super().__init__(f"API error {status}: {message}")
 
 
@@ -62,9 +65,16 @@ class LimitlessClient:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
+            timeout = aiohttp.ClientTimeout(
+                total=REQUEST_TIMEOUT_SECONDS,
+                connect=10,
+                sock_connect=10,
+                sock_read=REQUEST_TIMEOUT_SECONDS,
+            )
             self._session = aiohttp.ClientSession(
                 base_url=BASE_URL,
                 headers={"Content-Type": "application/json"},
+                timeout=timeout,
             )
         return self._session
 
@@ -100,21 +110,31 @@ class LimitlessClient:
             return False
         return True
 
-    async def _parse_error(self, resp: aiohttp.ClientResponse) -> str:
+    async def _parse_error(self, resp: aiohttp.ClientResponse) -> tuple[str, Optional[str]]:
         try:
             payload = await resp.json()
             if isinstance(payload, dict):
-                return (
+                message = (
                     payload.get("message")
                     or payload.get("error")
                     or json.dumps(payload)
                 )
+                code = payload.get("code")
+                mode = payload.get("mode")
+                resume_at = payload.get("resumeAt")
+                if mode:
+                    suffix = f" (mode: {mode}"
+                    if resume_at:
+                        suffix += f", resumes {str(resume_at)[:19]}"
+                    suffix += ")"
+                    message = f"{message}{suffix}"
+                return message, code
         except Exception:
             pass
         try:
-            return await resp.text()
+            return await resp.text(), None
         except Exception:
-            return f"HTTP {resp.status}"
+            return f"HTTP {resp.status}", None
 
     async def _request(
         self,
@@ -164,17 +184,25 @@ class LimitlessClient:
                         continue
 
                     if resp.status >= 400:
-                        message = await self._parse_error(resp)
-                        raise LimitlessAPIError(resp.status, message)
+                        message, code = await self._parse_error(resp)
+                        raise LimitlessAPIError(resp.status, message, code)
 
                     if resp.status == 204:
                         return {}
                     return await resp.json()
             except LimitlessAPIError:
                 raise
+            except asyncio.TimeoutError:
+                raise LimitlessAPIError(
+                    408,
+                    f"Request timed out after {REQUEST_TIMEOUT_SECONDS}s waiting for Limitless API",
+                )
             except aiohttp.ClientError as e:
                 if attempt == retries - 1:
-                    raise
+                    raise LimitlessAPIError(
+                        0,
+                        f"Network error contacting Limitless API: {e}",
+                    ) from e
                 await asyncio.sleep(2 ** attempt)
                 logger.warning(f"Request failed (attempt {attempt + 1}): {e}")
             finally:
@@ -257,6 +285,10 @@ class LimitlessClient:
         if not self._private_key:
             raise ValueError("Wallet private key is required to sign orders")
 
+        from eth_account import Account
+
+        wallet_address = Account.from_key(self._private_key).address
+
         market = market_data or await self.get_market(market_slug)
         venue = market.get("venue") or {}
         exchange = venue.get("exchange")
@@ -268,6 +300,14 @@ class LimitlessClient:
         owner_id = profile.get("id")
         if not owner_id:
             raise ValueError("Could not resolve profile id from GET /profiles/me")
+
+        profile_account = profile.get("account", "")
+        if profile_account and wallet_address.lower() != profile_account.lower():
+            raise ValueError(
+                "Wallet mismatch: the configured private key does not match the "
+                f"Limitless API token account ({profile_account}). "
+                "Use the same wallet for both."
+            )
 
         fee_rate_bps = 0
         rank = profile.get("rank") or {}
@@ -292,7 +332,17 @@ class LimitlessClient:
             "orderType": order_type,
             "marketSlug": market_slug,
         }
-        return await self._request("POST", "/orders", body=payload)
+        logger.info(
+            "Submitting %s order for %s %s on %s",
+            order_type,
+            outcome,
+            "BUY" if side == 0 else "SELL",
+            market_slug,
+        )
+        return await asyncio.wait_for(
+            self._request("POST", "/orders", body=payload),
+            timeout=ORDER_TIMEOUT_SECONDS,
+        )
 
     async def cancel_order(self, order_id: str) -> dict:
         return await self._request("DELETE", f"/orders/{order_id}")
