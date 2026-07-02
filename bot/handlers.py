@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Optional
 
@@ -22,13 +23,21 @@ from .formatters import (
     format_history,
     format_order_result,
 )
-from .limitless_client import LimitlessAPIError
+from .errors import format_api_error, reply_error
 
 logger = logging.getLogger(__name__)
 
 
 def get_client(context: ContextTypes.DEFAULT_TYPE):
     return context.application.bot_data["client"]
+
+
+async def _show_query_error(query, error: Exception, *, action: str) -> None:
+    await query.edit_message_text(
+        format_api_error(error, action=action),
+        parse_mode=ParseMode.HTML,
+        reply_markup=back_keyboard(),
+    )
 
 
 def is_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -126,8 +135,12 @@ async def portfolio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = format_portfolio(profile, positions, pnl, points)
         await msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=portfolio_keyboard())
     except Exception as e:
-        logger.error(f"Portfolio error: {e}")
-        await msg.edit_text("❌ Failed to load portfolio. Please try again.", reply_markup=back_keyboard())
+        logger.error(f"Portfolio error: {e}", exc_info=True)
+        await msg.edit_text(
+            format_api_error(e, action="load your portfolio"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=back_keyboard(),
+        )
 
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -166,8 +179,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = format_portfolio(profile, positions, pnl, points)
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=portfolio_keyboard())
         except Exception as e:
-            logger.error(f"Portfolio callback error: {e}")
-            await query.edit_message_text("❌ Failed to load portfolio.", reply_markup=back_keyboard())
+            logger.error(f"Portfolio callback error: {e}", exc_info=True)
+            await _show_query_error(query, e, action="load your portfolio")
 
     elif data == "menu_positions":
         await query.edit_message_text("⏳ Loading positions...")
@@ -177,8 +190,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = format_positions(positions)
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=portfolio_keyboard())
         except Exception as e:
-            logger.error(f"Positions error: {e}")
-            await query.edit_message_text("❌ Failed to load positions.", reply_markup=back_keyboard())
+            logger.error(f"Positions error: {e}", exc_info=True)
+            await _show_query_error(query, e, action="load your positions")
 
     elif data == "menu_history":
         await query.edit_message_text("⏳ Loading trade history...")
@@ -188,8 +201,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = format_history(history)
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=portfolio_keyboard())
         except Exception as e:
-            logger.error(f"History error: {e}")
-            await query.edit_message_text("❌ Failed to load history.", reply_markup=back_keyboard())
+            logger.error(f"History error: {e}", exc_info=True)
+            await _show_query_error(query, e, action="load trade history")
 
     elif data.startswith("tf_"):
         timeframe = data[3:]
@@ -220,8 +233,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=market_list_keyboard(filtered),
             )
         except Exception as e:
-            logger.error(f"Market list error: {e}")
-            await query.edit_message_text("❌ Failed to load markets.", reply_markup=back_keyboard())
+            logger.error(f"Market list error: {e}", exc_info=True)
+            await _show_query_error(query, e, action="load markets")
 
     elif data.startswith("market_"):
         slug = data[7:]
@@ -243,8 +256,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
         except Exception as e:
-            logger.error(f"Market detail error: {e}")
-            await query.edit_message_text("❌ Failed to load market.", reply_markup=back_keyboard())
+            logger.error(f"Market detail error: {e}", exc_info=True)
+            await _show_query_error(query, e, action="load market details")
 
     elif data.startswith("orderbook_"):
         slug = data[10:]
@@ -262,8 +275,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
         except Exception as e:
-            logger.error(f"Orderbook error: {e}")
-            await query.edit_message_text("❌ Failed to load orderbook.", reply_markup=back_keyboard())
+            logger.error(f"Orderbook error: {e}", exc_info=True)
+            await _show_query_error(query, e, action="load the orderbook")
 
     elif data.startswith("trade_"):
         parts = data.split("_")
@@ -316,8 +329,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await client.cancel_order(order_id)
             await query.edit_message_text("✅ Order cancelled successfully.", reply_markup=back_keyboard())
         except Exception as e:
-            logger.error(f"Cancel order error: {e}")
-            await query.edit_message_text("❌ Failed to cancel order.", reply_markup=back_keyboard())
+            logger.error(f"Cancel order error: {e}", exc_info=True)
+            await _show_query_error(query, e, action="cancel the order")
 
     elif data == "cancel_all_orders":
         await query.edit_message_text("⏳ Cancelling all orders...")
@@ -326,8 +339,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await client.cancel_all_orders()
             await query.edit_message_text("✅ All orders cancelled.", reply_markup=back_keyboard())
         except Exception as e:
-            logger.error(f"Cancel all error: {e}")
-            await query.edit_message_text("❌ Failed to cancel orders.", reply_markup=back_keyboard())
+            logger.error(f"Cancel all error: {e}", exc_info=True)
+            await _show_query_error(query, e, action="cancel all orders")
 
     elif data == "back":
         await query.edit_message_text(
@@ -441,12 +454,23 @@ async def _execute_order(update: Update, context: ContextTypes.DEFAULT_TYPE, que
     outcome = session.get("trade_outcome", "YES")
     order_type = session.get("order_type", "GTC")
     side = session.get("trade_side", "BUY")
+
+    if not slug:
+        await reply_error(
+            update,
+            query,
+            ValueError("No market selected. Browse markets and try again."),
+            action="place the order",
+        )
+        return
+
     if query:
         await query.edit_message_text("⏳ Placing order...")
+
     try:
         market_data = session.get("market_data")
         if not market_data:
-            market_data = await client.get_market(slug)
+            market_data = await asyncio.wait_for(client.get_market(slug), timeout=30)
             session["market_data"] = market_data
 
         result = await client.create_order(
@@ -461,16 +485,13 @@ async def _execute_order(update: Update, context: ContextTypes.DEFAULT_TYPE, que
         )
         text = format_order_result(result, slug, outcome, order_type)
         if query:
-            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=main_menu_keyboard())
+            await query.edit_message_text(
+                text, parse_mode=ParseMode.HTML, reply_markup=main_menu_keyboard()
+            )
         else:
-            await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=main_menu_keyboard())
-    except LimitlessAPIError as e:
-        logger.error(f"Order execution error: {e.message}")
-        error_text = f"❌ Order failed: {e.message[:200]}"
+            await update.message.reply_text(
+                text, parse_mode=ParseMode.HTML, reply_markup=main_menu_keyboard()
+            )
     except Exception as e:
-        logger.error(f"Order execution error: {e}")
-        error_text = f"❌ Order failed: {str(e)[:200]}"
-        if query:
-            await query.edit_message_text(error_text, reply_markup=back_keyboard())
-        else:
-            await update.message.reply_text(error_text, reply_markup=back_keyboard())
+        logger.error(f"Order execution error: {e}", exc_info=True)
+        await reply_error(update, query, e, action="place the order")
