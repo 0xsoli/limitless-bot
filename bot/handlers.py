@@ -22,16 +22,9 @@ from .formatters import (
     format_history,
     format_order_result,
 )
+from .limitless_client import LimitlessAPIError
 
 logger = logging.getLogger(__name__)
-
-
-def _derive_address(private_key: str) -> str:
-    try:
-        from eth_account import Account
-        return Account.from_key(private_key).address
-    except Exception:
-        return ""
 
 
 def get_client(context: ContextTypes.DEFAULT_TYPE):
@@ -126,9 +119,8 @@ async def portfolio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = context.application.bot_data["config"]
     msg = await update.message.reply_text("⏳ Loading portfolio...")
     try:
-        wallet = _derive_address(config.get("wallet_private_key", ""))
         positions = await client.get_portfolio_positions()
-        profile = await client.get_profile(wallet) if wallet else {}
+        profile = await client.get_current_profile()
         pnl = await client.get_pnl_chart()
         points = await client.get_points()
         text = format_portfolio(profile, positions, pnl, points)
@@ -167,9 +159,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         client = get_client(context)
         config = context.application.bot_data["config"]
         try:
-            wallet = _derive_address(config.get("wallet_private_key", ""))
             positions = await client.get_portfolio_positions()
-            profile = await client.get_profile(wallet) if wallet else {}
+            profile = await client.get_current_profile()
             pnl = await client.get_pnl_chart()
             points = await client.get_points()
             text = format_portfolio(profile, positions, pnl, points)
@@ -457,29 +448,25 @@ async def _execute_order(update: Update, context: ContextTypes.DEFAULT_TYPE, que
         if not market_data:
             market_data = await client.get_market(slug)
             session["market_data"] = market_data
-        tokens = market_data.get("tokens", market_data.get("positionIds", {}))
-        if isinstance(tokens, dict):
-            token_id = tokens.get("yes" if outcome == "YES" else "no", "")
-        elif isinstance(tokens, list):
-            token_id = tokens[0] if outcome == "YES" else (tokens[1] if len(tokens) > 1 else tokens[0])
-        else:
-            token_id = str(tokens)
-        payload = {
-            "marketSlug": slug,
-            "orderType": order_type,
-            "args": {"tokenId": token_id, "side": side},
-        }
-        if order_type == "FOK":
-            payload["args"]["makerAmount"] = session.get("trade_maker_amount")
-        else:
-            payload["args"]["price"] = session.get("trade_price")
-            payload["args"]["size"] = session.get("trade_size")
-        result = await client.create_order(payload)
+
+        result = await client.create_order(
+            market_slug=slug,
+            order_type=order_type,
+            outcome=outcome,
+            side=0 if side == "BUY" else 1,
+            price=session.get("trade_price") if order_type != "FOK" else None,
+            size=session.get("trade_size") if order_type != "FOK" else None,
+            usdc_amount=session.get("trade_maker_amount") if order_type == "FOK" else None,
+            market_data=market_data,
+        )
         text = format_order_result(result, slug, outcome, order_type)
         if query:
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=main_menu_keyboard())
         else:
             await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=main_menu_keyboard())
+    except LimitlessAPIError as e:
+        logger.error(f"Order execution error: {e.message}")
+        error_text = f"❌ Order failed: {e.message[:200]}"
     except Exception as e:
         logger.error(f"Order execution error: {e}")
         error_text = f"❌ Order failed: {str(e)[:200]}"
