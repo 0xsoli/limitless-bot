@@ -184,16 +184,12 @@ def format_history(history: Any) -> str:
 
 
 def format_order_result(result: dict, slug: str, outcome: str, order_type: str) -> str:
-    order = result.get("order", {})
-    execution = result.get("execution", {})
-    order_id = order.get("id", result.get("orderId", result.get("id", "—")))
-    status = execution.get("settlementStatus", result.get("status", "SUBMITTED"))
-    reason = execution.get("reason", "")
-    matched = execution.get("matched", False)
+    order_id = result.get("orderId", result.get("id", "—"))
+    status = result.get("status", "SUBMITTED")
     matches = result.get("makerMatches", result.get("fills", []))
+    filled = len(matches) > 0
 
-    failed_statuses = {"FAILED", "ERROR", "CANCELED"}
-    icon = "✅" if status not in failed_statuses else "❌"
+    icon = "✅" if status not in ("FAILED", "ERROR") else "❌"
 
     lines = [
         f"{icon} <b>Order {status}</b>",
@@ -201,21 +197,11 @@ def format_order_result(result: dict, slug: str, outcome: str, order_type: str) 
         f"Market:   <code>{slug}</code>",
         f"Outcome:  <b>{outcome}</b>",
         f"Type:     <b>{order_type}</b>",
-        f"Order ID: <code>{str(order_id)[:36]}</code>",
+        f"Order ID: <code>{str(order_id)[:32]}</code>",
     ]
 
-    if matched or matches:
-        lines.append(f"Matched:  <b>{'Yes' if matched else len(matches)}</b>")
-    if reason:
-        lines.append(f"Reason:   <b>{reason}</b>")
-
-    eligible_at = execution.get("eligibleAt")
-    if status == "DELAYED" and eligible_at:
-        lines.append(f"Eligible: <b>{eligible_at[:19]}</b>")
-
-    tx_hash = execution.get("txHash")
-    if tx_hash:
-        lines.append(f"Tx:       <code>{tx_hash[:18]}…</code>")
+    if filled:
+        lines.append(f"Fills:    <b>{len(matches)}</b>")
 
     return "\n".join(lines)
 
