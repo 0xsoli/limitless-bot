@@ -1,18 +1,15 @@
 import asyncio
-import base64
-import hashlib
-import hmac
 import logging
-from datetime import datetime, timezone
 from typing import Callable, Optional
 
 import socketio
+
+from .hmac_auth import sign_websocket_handshake
 
 logger = logging.getLogger(__name__)
 
 WS_URL = "wss://ws.limitless.exchange"
 WS_NAMESPACE = "/markets"
-WS_AUTH_PATH = "/socket.io/?EIO=4&transport=websocket"
 
 
 class WebSocketManager:
@@ -27,22 +24,6 @@ class WebSocketManager:
         self._position_callbacks: list[Callable] = []
         self._order_callbacks: list[Callable] = []
         self._reconnect_task: Optional[asyncio.Task] = None
-
-    def _ws_auth_headers(self) -> dict:
-        timestamp = datetime.now(timezone.utc).isoformat()
-        message = f"{timestamp}\nGET\n{WS_AUTH_PATH}\n"
-        signature = base64.b64encode(
-            hmac.new(
-                base64.b64decode(self._secret),
-                message.encode("utf-8"),
-                hashlib.sha256,
-            ).digest()
-        ).decode("utf-8")
-        return {
-            "lmts-api-key": self._token_id,
-            "lmts-timestamp": timestamp,
-            "lmts-signature": signature,
-        }
 
     async def connect(self):
         self._sio = socketio.AsyncClient(
@@ -94,7 +75,7 @@ class WebSocketManager:
                 WS_URL,
                 namespaces=[WS_NAMESPACE],
                 transports=["websocket"],
-                headers=self._ws_auth_headers(),
+                headers=sign_websocket_handshake(self._token_id, self._secret),
             )
         except Exception as e:
             logger.error(f"WebSocket connection failed: {e}")
