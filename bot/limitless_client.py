@@ -1,35 +1,20 @@
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import logging
 import time
-import uuid
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import aiohttp
-
-from .hmac_auth import serialize_body, sign_request
-from .order_signer import build_signed_order
-from .trading_validation import (
-    TradingReadinessError,
-    build_allowance_failure,
-    required_usdc_for_buy,
-    resolve_allowance_type,
-    validate_wallet_for_bot,
-)
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.limitless.exchange"
 MIN_DELAY_BETWEEN_CALLS = 0.31
 MAX_CONCURRENT_REQUESTS = 2
-REQUEST_TIMEOUT_SECONDS = 30
-ORDER_TIMEOUT_SECONDS = 60
-
-PUBLIC_PREFIXES = (
-    "/markets/active",
-    "/markets/active-slugs",
-    "/markets/search",
-)
 
 
 class RateLimiter:
@@ -51,79 +36,36 @@ class RateLimiter:
         self._semaphore.release()
 
 
-class LimitlessAPIError(Exception):
-    def __init__(self, status: int, message: str, code: Optional[str] = None):
-        self.status = status
-        self.message = message
-        self.code = code
-        super().__init__(f"API error {status}: {message}")
-
-
 class LimitlessClient:
-    def __init__(self, token_id: str, secret: str, private_key: str = ""):
+    def __init__(self, token_id: str, secret: str):
         self._token_id = token_id
         self._secret = secret
-        self._private_key = private_key
         self._rate_limiter = RateLimiter()
         self._session: Optional[aiohttp.ClientSession] = None
-        self._profile_cache: Optional[dict] = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            timeout = aiohttp.ClientTimeout(
-                total=REQUEST_TIMEOUT_SECONDS,
-                connect=10,
-                sock_connect=10,
-                sock_read=REQUEST_TIMEOUT_SECONDS,
-            )
             self._session = aiohttp.ClientSession(
                 base_url=BASE_URL,
                 headers={"Content-Type": "application/json"},
-                timeout=timeout,
             )
         return self._session
 
-    def _requires_auth(self, method: str, path: str) -> bool:
-        if method.upper() != "GET":
-            return True
-        if path.startswith("/portfolio") or path.startswith("/profiles"):
-            return True
-        if path.endswith("/user-orders"):
-            return True
-        for prefix in PUBLIC_PREFIXES:
-            if path.startswith(prefix):
-                return False
-        if path.startswith("/markets/") and "/orderbook" in path:
-            return False
-        if path.startswith("/markets/") and path.count("/") == 2:
-            return False
-        return True
-
-    async def _parse_error(self, resp: aiohttp.ClientResponse) -> tuple[str, Optional[str]]:
-        try:
-            payload = await resp.json()
-            if isinstance(payload, dict):
-                message = (
-                    payload.get("message")
-                    or payload.get("error")
-                    or json.dumps(payload)
-                )
-                code = payload.get("code")
-                mode = payload.get("mode")
-                resume_at = payload.get("resumeAt")
-                if mode:
-                    suffix = f" (mode: {mode}"
-                    if resume_at:
-                        suffix += f", resumes {str(resume_at)[:19]}"
-                    suffix += ")"
-                    message = f"{message}{suffix}"
-                return message, code
-        except Exception:
-            pass
-        try:
-            return await resp.text(), None
-        except Exception:
-            return f"HTTP {resp.status}", None
+    def _sign(self, method: str, path: str, body: str = "") -> dict:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        message = f"{timestamp}\n{method}\n{path}\n{body}"
+        signature = base64.b64encode(
+            hmac.new(
+                base64.b64decode(self._secret),
+                message.encode("utf-8"),
+                hashlib.sha256,
+            ).digest()
+        ).decode("utf-8")
+        return {
+            "lmts-api-key": self._token_id,
+            "lmts-timestamp": timestamp,
+            "lmts-signature": signature,
+        }
 
     async def _request(
         self,
@@ -133,28 +75,19 @@ class LimitlessClient:
         body: Optional[dict] = None,
         retries: int = 3,
     ) -> Any:
-        from urllib.parse import urlencode
-
         query_string = ""
         if params:
+            from urllib.parse import urlencode
             query_string = "?" + urlencode(params)
 
         full_path = path + query_string
-        body_str = serialize_body(body)
+        body_str = json.dumps(body) if body else ""
 
         for attempt in range(retries):
             await self._rate_limiter.acquire()
             try:
                 session = await self._get_session()
-                headers = {}
-                if self._requires_auth(method, path):
-                    headers = sign_request(
-                        self._token_id,
-                        self._secret,
-                        method,
-                        full_path,
-                        body_str,
-                    )
+                headers = self._sign(method, full_path, body_str)
                 if body:
                     headers["Content-Type"] = "application/json"
 
@@ -162,13 +95,11 @@ class LimitlessClient:
                     method,
                     full_path,
                     headers=headers,
-                    data=body_str if body_str else None,
+                    data=body_str if body else None,
                 ) as resp:
                     if resp.status == 429:
                         retry_after = float(resp.headers.get("Retry-After", 1.0))
-                        logger.warning(
-                            f"Rate limited. Waiting {retry_after}s before retry {attempt + 1}"
-                        )
+                        logger.warning(f"Rate limited. Waiting {retry_after}s before retry {attempt + 1}")
                         await asyncio.sleep(retry_after)
                         continue
 
@@ -178,26 +109,11 @@ class LimitlessClient:
                         await asyncio.sleep(wait_time)
                         continue
 
-                    if resp.status >= 400:
-                        message, code = await self._parse_error(resp)
-                        raise LimitlessAPIError(resp.status, message, code)
-
-                    if resp.status == 204:
-                        return {}
+                    resp.raise_for_status()
                     return await resp.json()
-            except LimitlessAPIError:
-                raise
-            except asyncio.TimeoutError:
-                raise LimitlessAPIError(
-                    408,
-                    f"Request timed out after {REQUEST_TIMEOUT_SECONDS}s waiting for Limitless API",
-                )
             except aiohttp.ClientError as e:
                 if attempt == retries - 1:
-                    raise LimitlessAPIError(
-                        0,
-                        f"Network error contacting Limitless API: {e}",
-                    ) from e
+                    raise
                 await asyncio.sleep(2 ** attempt)
                 logger.warning(f"Request failed (attempt {attempt + 1}): {e}")
             finally:
@@ -205,7 +121,7 @@ class LimitlessClient:
 
         raise RuntimeError(f"Request failed after {retries} attempts: {method} {path}")
 
-    async def get_active_markets(self, page: int = 1, limit: int = 20, trade_type: str = "clob") -> dict:
+    async def get_active_markets(self, page: int = 1, limit: int = 20, trade_type: str = None) -> dict:
         params = {"page": page, "limit": limit}
         if trade_type:
             params["tradeType"] = trade_type
@@ -226,13 +142,6 @@ class LimitlessClient:
     async def get_orderbook(self, slug: str) -> dict:
         return await self._request("GET", f"/markets/{slug}/orderbook")
 
-    async def get_current_profile(self, force_refresh: bool = False) -> dict:
-        if self._profile_cache and not force_refresh:
-            return self._profile_cache
-        profile = await self._request("GET", "/profiles/me")
-        self._profile_cache = profile
-        return profile
-
     async def get_portfolio_positions(self) -> dict:
         return await self._request("GET", "/portfolio/positions")
 
@@ -251,148 +160,8 @@ class LimitlessClient:
     async def get_user_orders(self, slug: str) -> dict:
         return await self._request("GET", f"/markets/{slug}/user-orders")
 
-    async def get_trading_allowance(self, allowance_type: str, spender: str) -> dict:
-        return await self._request(
-            "GET",
-            "/portfolio/trading/allowance",
-            params={"type": allowance_type, "spender": spender},
-        )
-
-    async def _validate_buy_readiness(
-        self,
-        *,
-        market: dict,
-        exchange: str,
-        profile: dict,
-        wallet_address: str,
-        order_type: str,
-        price: Optional[float],
-        size: Optional[float],
-        usdc_amount: Optional[float],
-    ) -> None:
-        trading_address = validate_wallet_for_bot(profile, wallet_address)
-        allowance_type = resolve_allowance_type(market)
-        required_usdc = required_usdc_for_buy(
-            order_type=order_type,
-            price=price,
-            size=size,
-            usdc_amount=usdc_amount,
-        )
-
-        allowance_info = await self.get_trading_allowance(allowance_type, exchange)
-        has_minimum = bool(allowance_info.get("hasMinimumAllowance"))
-
-        logger.info(
-            "Allowance check type=%s spender=%s checked=%s hasMinimum=%s",
-            allowance_type,
-            exchange,
-            allowance_info.get("checkedAddress", trading_address),
-            has_minimum,
-        )
-
-        if not has_minimum:
-            raise build_allowance_failure(
-                wallet_address=trading_address,
-                exchange=exchange,
-                allowance_info=allowance_info,
-                required_usdc=required_usdc,
-                allowance_type=allowance_type,
-            )
-
-    def _resolve_token_id(self, market_data: dict, outcome: str) -> str:
-        tokens = market_data.get("tokens") or market_data.get("positionIds") or {}
-        outcome_key = "yes" if outcome.upper() == "YES" else "no"
-
-        if isinstance(tokens, dict):
-            token_id = tokens.get(outcome_key) or tokens.get(outcome_key.upper())
-            if token_id:
-                return str(token_id)
-
-        if isinstance(tokens, list) and tokens:
-            return str(tokens[0] if outcome.upper() == "YES" else tokens[min(1, len(tokens) - 1)])
-
-        raise ValueError(f"Could not resolve {outcome} token ID for market")
-
-    async def create_order(
-        self,
-        *,
-        market_slug: str,
-        order_type: str,
-        outcome: str = "YES",
-        side: int = 0,
-        price: Optional[float] = None,
-        size: Optional[float] = None,
-        usdc_amount: Optional[float] = None,
-        market_data: Optional[dict] = None,
-    ) -> dict:
-        if not self._private_key:
-            raise ValueError("Wallet private key is required to sign orders")
-
-        from eth_account import Account
-
-        wallet_address = Account.from_key(self._private_key).address
-
-        market = market_data or await self.get_market(market_slug)
-        venue = market.get("venue") or {}
-        exchange = venue.get("exchange")
-        if not exchange:
-            raise ValueError("Market does not expose venue.exchange — only CLOB markets can be traded")
-
-        token_id = self._resolve_token_id(market, outcome)
-        profile = await self.get_current_profile()
-        owner_id = profile.get("id")
-        if not owner_id:
-            raise ValueError("Could not resolve profile id from GET /profiles/me")
-
-        validate_wallet_for_bot(profile, wallet_address)
-
-        if side == 0:
-            await self._validate_buy_readiness(
-                market=market,
-                exchange=exchange,
-                profile=profile,
-                wallet_address=wallet_address,
-                order_type=order_type,
-                price=price,
-                size=size,
-                usdc_amount=usdc_amount,
-            )
-
-        fee_rate_bps = 0
-        rank = profile.get("rank") or {}
-        if isinstance(rank, dict):
-            fee_rate_bps = int(rank.get("feeRateBps", 0))
-
-        signed_order = build_signed_order(
-            private_key=self._private_key,
-            token_id=token_id,
-            verifying_contract=exchange,
-            side=side,
-            order_type=order_type,
-            fee_rate_bps=fee_rate_bps,
-            price=price,
-            size=size,
-            usdc_amount=usdc_amount,
-        )
-
-        payload = {
-            "order": signed_order,
-            "ownerId": owner_id,
-            "orderType": order_type,
-            "marketSlug": market_slug,
-            "clientOrderId": f"tg-{uuid.uuid4().hex[:24]}",
-        }
-        logger.info(
-            "Submitting %s order for %s %s on %s (HMAC auth + EIP-712 order signature)",
-            order_type,
-            outcome,
-            "BUY" if side == 0 else "SELL",
-            market_slug,
-        )
-        return await asyncio.wait_for(
-            self._request("POST", "/orders", body=payload),
-            timeout=ORDER_TIMEOUT_SECONDS,
-        )
+    async def create_order(self, payload: dict) -> dict:
+        return await self._request("POST", "/orders", body=payload)
 
     async def cancel_order(self, order_id: str) -> dict:
         return await self._request("DELETE", f"/orders/{order_id}")
