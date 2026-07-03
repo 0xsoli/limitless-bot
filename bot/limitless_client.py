@@ -16,6 +16,25 @@ BASE_URL = "https://api.limitless.exchange"
 MIN_DELAY_BETWEEN_CALLS = 0.31
 MAX_CONCURRENT_REQUESTS = 2
 
+_FOOTBALL_PAGE_FILTERS = {
+    "fifa-world-cup": {"football-leagues": "fifa-world-cup"},
+    "matches": {"football-tab": "matches"},
+    "props": {"football-tab": "props"},
+    "player-props": {"football-tab": "player-props"},
+    "off-the-pitch": {"football-tab": "off-the-pitch"},
+    "england-premier-league": {"football-leagues": "england-premier-league"},
+    "uefa-champions-league": {"football-leagues": "uefa-champions-league"},
+    "spain-laliga": {"football-leagues": "spain-laliga"},
+    "italy-serie-a": {"football-leagues": "italy-serie-a"},
+    "bundesliga": {"football-leagues": "bundesliga"},
+}
+
+
+def _is_football_market(market: dict) -> bool:
+    tags = [t.lower() for t in market.get("tags", [])]
+    metadata = market.get("metadata") or {}
+    return "football" in tags or metadata.get("sportType") == "football"
+
 
 class RateLimiter:
     def __init__(self):
@@ -129,6 +148,51 @@ class LimitlessClient:
 
     async def get_active_markets_by_category(self, category_id: int, page: int = 1, limit: int = 20) -> dict:
         return await self._request("GET", f"/markets/active/{category_id}", params={"page": page, "limit": limit})
+
+    async def get_navigation(self) -> list:
+        return await self._request("GET", "/navigation")
+
+    async def get_market_page_by_path(self, path: str) -> dict:
+        return await self._request("GET", "/market-pages/by-path", params={"path": path})
+
+    async def get_page_markets(
+        self,
+        page_id: str,
+        page: int = 1,
+        limit: int = 20,
+        sort: str = "-updatedAt",
+        filters: Optional[dict] = None,
+    ) -> dict:
+        params: dict[str, Any] = {"page": page, "limit": limit, "sort": sort}
+        if filters:
+            params.update(filters)
+        return await self._request("GET", f"/market-pages/{page_id}/markets", params=params)
+
+    async def get_football_markets(
+        self,
+        filter_key: str = "fifa-world-cup",
+        page: int = 1,
+        limit: int = 20,
+    ) -> dict:
+        sport_page = await self.get_market_page_by_path("/sport")
+        page_id = sport_page["id"]
+        filters = _FOOTBALL_PAGE_FILTERS.get(filter_key)
+        if filters:
+            return await self.get_page_markets(page_id, page=page, limit=limit, filters=filters)
+
+        result = await self.get_page_markets(page_id, page=page, limit=limit)
+        markets = [
+            m for m in result.get("data", [])
+            if _is_football_market(m)
+        ]
+        result["data"] = markets
+        pagination = result.get("pagination", {})
+        if pagination:
+            pagination = dict(pagination)
+            pagination["total"] = len(markets)
+            pagination["totalPages"] = max(1, (len(markets) + limit - 1) // limit)
+            result["pagination"] = pagination
+        return result
 
     async def get_market(self, slug: str) -> dict:
         return await self._request("GET", f"/markets/{slug}")
