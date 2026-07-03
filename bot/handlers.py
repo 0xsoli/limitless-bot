@@ -8,6 +8,8 @@ from telegram.constants import ParseMode
 from .keyboards import (
     main_menu_keyboard,
     timeframe_keyboard,
+    football_league_keyboard,
+    football_group_keyboard,
     market_list_keyboard,
     order_type_keyboard,
     confirm_keyboard,
@@ -200,9 +202,74 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"History error: {e}")
             await query.edit_message_text("❌ Failed to load history.", reply_markup=back_keyboard())
 
+    elif data == "noop":
+        await query.answer()
+
+    elif data == "tf_football":
+        session["market_source"] = "football"
+        await query.edit_message_text("⏳ Loading football categories...")
+        client = get_client(context)
+        try:
+            sport_page = await client.get_market_page_by_path("/sport")
+            football_group = next(
+                (g for g in sport_page.get("filterGroups", []) if g.get("slug") == "football"),
+                None,
+            )
+            options = []
+            if football_group:
+                options.extend(football_group.get("options", []))
+                tabs = football_group.get("tabs", {})
+                for tab in tabs.get("options", []):
+                    if tab.get("count", 0) > 0:
+                        options.append(tab)
+            if not options:
+                options = [{"label": "FIFA World Cup", "value": "fifa-world-cup", "count": 1}]
+            await query.edit_message_text(
+                "⚽ <b>Football Markets</b>\n\nSelect a league or category:",
+                parse_mode=ParseMode.HTML,
+                reply_markup=football_league_keyboard(options),
+            )
+        except Exception as e:
+            logger.error(f"Football menu error: {e}")
+            await query.edit_message_text("❌ Failed to load football categories.", reply_markup=back_keyboard())
+
+    elif data.startswith("fbpage_"):
+        parts = data[8:].rsplit("_", 1)
+        if len(parts) != 2:
+            await query.edit_message_text("❌ Invalid page.", reply_markup=back_keyboard())
+            return
+        filter_key, page_str = parts
+        await _show_football_markets(query, context, session, filter_key, int(page_str))
+
+    elif data.startswith("fb_"):
+        filter_key = data[3:]
+        session["football_filter"] = filter_key
+        session["market_source"] = "football"
+        await _show_football_markets(query, context, session, filter_key, 1)
+
+    elif data.startswith("fbgroup_"):
+        slug = data[8:]
+        session["market_source"] = "football"
+        await query.edit_message_text("⏳ Loading match outcomes...")
+        client = get_client(context)
+        try:
+            group_market = await client.get_market(slug)
+            session["selected_group"] = slug
+            title = group_market.get("title", slug)
+            back_callback = f"fb_{session.get('football_filter', 'fifa-world-cup')}"
+            await query.edit_message_text(
+                f"⚽ <b>{title}</b>\n\nSelect an outcome to trade:",
+                parse_mode=ParseMode.HTML,
+                reply_markup=football_group_keyboard(group_market, back_callback),
+            )
+        except Exception as e:
+            logger.error(f"Football group error: {e}")
+            await query.edit_message_text("❌ Failed to load match outcomes.", reply_markup=back_keyboard())
+
     elif data.startswith("tf_"):
         timeframe = data[3:]
         session["timeframe"] = timeframe
+        session["market_source"] = "crypto"
         await query.edit_message_text("⏳ Loading markets...")
         client = get_client(context)
         try:
@@ -242,13 +309,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             orderbook = await client.get_orderbook(slug)
             session["market_data"] = market
             text = format_market_info(market, orderbook)
+            back_callback = _market_back_callback(session)
             keyboard = InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton("🟢 Buy YES", callback_data=f"trade_buy_yes_{slug}"),
                     InlineKeyboardButton("🔴 Buy NO", callback_data=f"trade_buy_no_{slug}"),
                 ],
                 [InlineKeyboardButton("📖 Full Orderbook", callback_data=f"orderbook_{slug}")],
-                [InlineKeyboardButton("◀️ Back to Markets", callback_data=f"tf_{session.get('timeframe', '1h')}")],
+                [InlineKeyboardButton("◀️ Back to Markets", callback_data=back_callback)],
             ])
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
         except Exception as e:
@@ -344,6 +412,65 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML,
             reply_markup=main_menu_keyboard(),
         )
+
+
+def _market_back_callback(session: dict) -> str:
+    if session.get("market_source") == "football":
+        return f"fb_{session.get('football_filter', 'fifa-world-cup')}"
+    return f"tf_{session.get('timeframe', '1h')}"
+
+
+def _football_filter_label(filter_key: str) -> str:
+    labels = {
+        "all": "All Football",
+        "fifa-world-cup": "FIFA World Cup",
+        "matches": "Matches",
+        "props": "Props",
+        "player-props": "Player Props",
+        "off-the-pitch": "Off the Pitch",
+        "england-premier-league": "Premier League",
+        "uefa-champions-league": "Champions League",
+        "spain-laliga": "La Liga",
+        "italy-serie-a": "Serie A",
+        "bundesliga": "Bundesliga",
+    }
+    return labels.get(filter_key, filter_key.replace("-", " ").title())
+
+
+async def _show_football_markets(query, context, session, filter_key: str, page: int):
+    await query.edit_message_text("⏳ Loading football markets...")
+    client = get_client(context)
+    try:
+        result = await client.get_football_markets(filter_key=filter_key, page=page, limit=15)
+        markets = result.get("data", [])
+        pagination = result.get("pagination", {})
+        total_pages = pagination.get("totalPages", 1)
+        session["market_list"] = markets
+        session["football_filter"] = filter_key
+        session["football_page"] = page
+        session["market_source"] = "football"
+        label = _football_filter_label(filter_key)
+        if not markets:
+            await query.edit_message_text(
+                f"⚽ <b>{label}</b>\n\nNo active football markets found.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=back_keyboard(),
+            )
+            return
+        await query.edit_message_text(
+            f"⚽ <b>Football — {label}</b>\n\nSelect a market:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=market_list_keyboard(
+                markets,
+                back_callback="tf_football",
+                page=page,
+                total_pages=total_pages,
+                page_callback_prefix=f"fbpage_{filter_key}_",
+            ),
+        )
+    except Exception as e:
+        logger.error(f"Football market list error: {e}")
+        await query.edit_message_text("❌ Failed to load football markets.", reply_markup=back_keyboard())
 
 
 async def _show_order_type(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = False):
