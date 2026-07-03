@@ -4,8 +4,6 @@ from typing import Callable, Optional
 
 import socketio
 
-from .hmac_auth import sign_websocket_handshake
-
 logger = logging.getLogger(__name__)
 
 WS_URL = "wss://ws.limitless.exchange"
@@ -13,9 +11,8 @@ WS_NAMESPACE = "/markets"
 
 
 class WebSocketManager:
-    def __init__(self, token_id: str, secret: str, bot=None):
-        self._token_id = token_id
-        self._secret = secret
+    def __init__(self, api_key: str, bot=None):
+        self._api_key = api_key
         self._bot = bot
         self._sio: Optional[socketio.AsyncClient] = None
         self._connected = False
@@ -48,9 +45,8 @@ class WebSocketManager:
         @self._sio.on("orderbookUpdate", namespace=WS_NAMESPACE)
         async def on_orderbook(data):
             slug = data.get("marketSlug", "")
-            orderbook = data.get("orderbook", data)
             if slug in self._orderbook_callbacks:
-                await self._orderbook_callbacks[slug](orderbook)
+                await self._orderbook_callbacks[slug](data)
 
         @self._sio.on("positions", namespace=WS_NAMESPACE)
         async def on_positions(data):
@@ -75,7 +71,7 @@ class WebSocketManager:
                 WS_URL,
                 namespaces=[WS_NAMESPACE],
                 transports=["websocket"],
-                headers=sign_websocket_handshake(self._token_id, self._secret),
+                headers={"X-API-Key": self._api_key},
             )
         except Exception as e:
             logger.error(f"WebSocket connection failed: {e}")
