@@ -31,34 +31,57 @@ def _num(value, decimals: int = 2) -> str:
 def format_market_info(market: dict, orderbook: dict) -> str:
     title = market.get("title", "Unknown Market")
     slug = market.get("slug", "")
-    market_type = market.get("type", "")
-    end_date = market.get("endDate", market.get("closeTime", "TBD"))
+    end_date = market.get(
+        "expirationDate",
+        market.get("endDate", market.get("closeTime", "TBD")),
+    )
     volume = market.get("volume", market.get("totalVolume", 0))
     liquidity = market.get("liquidity", 0)
+    metadata = market.get("metadata") or {}
 
     yes_price = "N/A"
     no_price = "N/A"
+
+    prices = market.get("prices", [])
+    if isinstance(prices, list) and len(prices) >= 2:
+        yes_price = f"{float(prices[0]):.2f}"
+        no_price = f"{float(prices[1]):.2f}"
 
     if orderbook:
         bids = orderbook.get("bids", [])
         asks = orderbook.get("asks", [])
         if asks:
-            yes_price = f"{float(asks[0].get('price', 0)):.2f}" if asks else "N/A"
+            yes_price = f"{float(asks[0].get('price', 0)):.2f}"
         if bids:
-            no_price = f"{1 - float(bids[0].get('price', 0)):.2f}" if bids else "N/A"
+            no_price = f"{1 - float(bids[0].get('price', 0)):.2f}"
 
-    lines = [
-        f"📊 <b>{title}</b>",
-        f"",
+    trade_prices = market.get("tradePrices", {})
+    buy_market = trade_prices.get("buy", {}).get("market", [])
+    if yes_price == "N/A" and len(buy_market) >= 2:
+        yes_price = f"{float(buy_market[0]):.2f}"
+        no_price = f"{float(buy_market[1]):.2f}"
+
+    lines = [f"📊 <b>{title}</b>", ""]
+
+    home_team = metadata.get("homeTeam")
+    away_team = metadata.get("awayTeam")
+    if home_team and away_team:
+        lines.append(f"🏟 <b>{home_team}</b> vs <b>{away_team}</b>")
+
+    league = metadata.get("leagueNameFull")
+    if league:
+        lines.append(f"🏆 {league}")
+
+    lines.extend([
         f"🔖 <code>{slug}</code>",
-        f"📅 Closes: <b>{str(end_date)[:10]}</b>",
-        f"",
+        f"📅 Closes: <b>{str(end_date)[:16]}</b>",
+        "",
         f"💵 YES Price:  <b>{yes_price}</b>",
         f"💵 NO Price:   <b>{no_price}</b>",
-        f"",
+        "",
         f"📦 Volume:     {_usdc(volume)}",
         f"💧 Liquidity:  {_usdc(liquidity)}",
-    ]
+    ])
     return "\n".join(lines)
 
 
