@@ -1,3 +1,19 @@
+"""
+EIP-712 order signing for Limitless Exchange.
+
+Official docs require TWO separate signing layers for EOA trading:
+
+1. HMAC-SHA256 — authenticates the HTTP request (see hmac_auth.py)
+   https://docs.limitless.exchange/developers/authentication
+
+2. EIP-712 — signs the order object inside the request body
+   https://docs.limitless.exchange/developers/eip712-signing
+   https://docs.limitless.exchange/api-reference/trading/create-order
+
+HMAC alone cannot place orders. The API expects a signed `order` object with
+`signature` and `signatureType` fields (unless you have partner `delegated_signing`).
+"""
+
 import secrets
 import time
 from typing import Optional
