@@ -1,16 +1,21 @@
 import asyncio
-import base64
-import hashlib
-import hmac
 import json
 import logging
 import time
-from datetime import datetime, timezone
+import uuid
 from typing import Any, Optional
 
 import aiohttp
 
+from .hmac_auth import serialize_body, sign_request
 from .order_signer import build_signed_order
+from .trading_validation import (
+    TradingReadinessError,
+    build_allowance_failure,
+    required_usdc_for_buy,
+    resolve_allowance_type,
+    validate_wallet_for_bot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,22 +83,6 @@ class LimitlessClient:
             )
         return self._session
 
-    def _sign(self, method: str, path: str, body: str = "") -> dict:
-        timestamp = datetime.now(timezone.utc).isoformat()
-        message = f"{timestamp}\n{method}\n{path}\n{body}"
-        signature = base64.b64encode(
-            hmac.new(
-                base64.b64decode(self._secret),
-                message.encode("utf-8"),
-                hashlib.sha256,
-            ).digest()
-        ).decode("utf-8")
-        return {
-            "lmts-api-key": self._token_id,
-            "lmts-timestamp": timestamp,
-            "lmts-signature": signature,
-        }
-
     def _requires_auth(self, method: str, path: str) -> bool:
         if method.upper() != "GET":
             return True
@@ -151,7 +140,7 @@ class LimitlessClient:
             query_string = "?" + urlencode(params)
 
         full_path = path + query_string
-        body_str = json.dumps(body, separators=(",", ":")) if body else ""
+        body_str = serialize_body(body)
 
         for attempt in range(retries):
             await self._rate_limiter.acquire()
@@ -159,7 +148,13 @@ class LimitlessClient:
                 session = await self._get_session()
                 headers = {}
                 if self._requires_auth(method, path):
-                    headers = self._sign(method, full_path, body_str)
+                    headers = sign_request(
+                        self._token_id,
+                        self._secret,
+                        method,
+                        full_path,
+                        body_str,
+                    )
                 if body:
                     headers["Content-Type"] = "application/json"
 
@@ -167,7 +162,7 @@ class LimitlessClient:
                     method,
                     full_path,
                     headers=headers,
-                    data=body_str if body else None,
+                    data=body_str if body_str else None,
                 ) as resp:
                     if resp.status == 429:
                         retry_after = float(resp.headers.get("Retry-After", 1.0))
@@ -256,6 +251,54 @@ class LimitlessClient:
     async def get_user_orders(self, slug: str) -> dict:
         return await self._request("GET", f"/markets/{slug}/user-orders")
 
+    async def get_trading_allowance(self, allowance_type: str, spender: str) -> dict:
+        return await self._request(
+            "GET",
+            "/portfolio/trading/allowance",
+            params={"type": allowance_type, "spender": spender},
+        )
+
+    async def _validate_buy_readiness(
+        self,
+        *,
+        market: dict,
+        exchange: str,
+        profile: dict,
+        wallet_address: str,
+        order_type: str,
+        price: Optional[float],
+        size: Optional[float],
+        usdc_amount: Optional[float],
+    ) -> None:
+        trading_address = validate_wallet_for_bot(profile, wallet_address)
+        allowance_type = resolve_allowance_type(market)
+        required_usdc = required_usdc_for_buy(
+            order_type=order_type,
+            price=price,
+            size=size,
+            usdc_amount=usdc_amount,
+        )
+
+        allowance_info = await self.get_trading_allowance(allowance_type, exchange)
+        has_minimum = bool(allowance_info.get("hasMinimumAllowance"))
+
+        logger.info(
+            "Allowance check type=%s spender=%s checked=%s hasMinimum=%s",
+            allowance_type,
+            exchange,
+            allowance_info.get("checkedAddress", trading_address),
+            has_minimum,
+        )
+
+        if not has_minimum:
+            raise build_allowance_failure(
+                wallet_address=trading_address,
+                exchange=exchange,
+                allowance_info=allowance_info,
+                required_usdc=required_usdc,
+                allowance_type=allowance_type,
+            )
+
     def _resolve_token_id(self, market_data: dict, outcome: str) -> str:
         tokens = market_data.get("tokens") or market_data.get("positionIds") or {}
         outcome_key = "yes" if outcome.upper() == "YES" else "no"
@@ -301,12 +344,18 @@ class LimitlessClient:
         if not owner_id:
             raise ValueError("Could not resolve profile id from GET /profiles/me")
 
-        profile_account = profile.get("account", "")
-        if profile_account and wallet_address.lower() != profile_account.lower():
-            raise ValueError(
-                "Wallet mismatch: the configured private key does not match the "
-                f"Limitless API token account ({profile_account}). "
-                "Use the same wallet for both."
+        validate_wallet_for_bot(profile, wallet_address)
+
+        if side == 0:
+            await self._validate_buy_readiness(
+                market=market,
+                exchange=exchange,
+                profile=profile,
+                wallet_address=wallet_address,
+                order_type=order_type,
+                price=price,
+                size=size,
+                usdc_amount=usdc_amount,
             )
 
         fee_rate_bps = 0
@@ -331,9 +380,10 @@ class LimitlessClient:
             "ownerId": owner_id,
             "orderType": order_type,
             "marketSlug": market_slug,
+            "clientOrderId": f"tg-{uuid.uuid4().hex[:24]}",
         }
         logger.info(
-            "Submitting %s order for %s %s on %s",
+            "Submitting %s order for %s %s on %s (HMAC auth + EIP-712 order signature)",
             order_type,
             outcome,
             "BUY" if side == 0 else "SELL",
