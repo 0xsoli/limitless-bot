@@ -82,39 +82,30 @@ check_root() {
     fi
 }
 
-install_system_dependencies() {
-    print_step "Installing system dependencies"
+check_dependencies() {
+    print_step "Checking system dependencies"
+    local missing=()
 
-    if ! command -v apt-get &>/dev/null; then
-        print_error "This installer supports Ubuntu/Debian only (apt-get not found)."
-        exit 1
+    for cmd in python3 pip3 git curl; do
+        if ! command -v "$cmd" &>/dev/null; then
+            missing+=("$cmd")
+        fi
+    done
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        print_warning "Installing missing packages: ${missing[*]}"
+        apt-get update -qq
+        apt-get install -y -qq python3 python3-pip python3-venv git curl
     fi
 
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
-    apt-get install -y -qq \
-        python3 \
-        python3-pip \
-        python3-venv \
-        python3-dev \
-        build-essential \
-        git \
-        curl \
-        ca-certificates
-
-    if ! command -v python3 &>/dev/null; then
-        print_error "Python 3 installation failed."
-        exit 1
-    fi
-
+    python3_version=$(python3 --version 2>&1 | grep -oP '\d+\.\d+' | head -1)
+    required="3.9"
     if ! python3 -c "import sys; exit(0 if sys.version_info >= (3,9) else 1)"; then
-        python3_version=$(python3 --version 2>&1 | awk '{print $2}')
         print_error "Python 3.9+ is required. Found: $python3_version"
         exit 1
     fi
 
-    python3_version=$(python3 --version 2>&1 | awk '{print $2}')
-    print_success "System dependencies installed (Python $python3_version)"
+    print_success "All dependencies satisfied (Python $python3_version)"
 }
 
 collect_config() {
@@ -158,28 +149,17 @@ install_bot() {
     if [[ -f "$SCRIPT_DIR/run.py" ]]; then
         cp -r "$SCRIPT_DIR"/* "$INSTALL_DIR/"
         print_success "Files copied from local source"
-    elif [[ -d "$INSTALL_DIR/.git" ]]; then
-        print_warning "Updating existing repository..."
-        git -C "$INSTALL_DIR" pull --ff-only --quiet
-        print_success "Repository updated"
     else
         print_warning "Cloning from repository..."
-        rm -rf "$INSTALL_DIR"
         git clone "$REPO_URL" "$INSTALL_DIR" --quiet
         print_success "Repository cloned"
     fi
 
     print_step "Creating Python virtual environment"
     python3 -m venv "$INSTALL_DIR/venv"
-    "$INSTALL_DIR/venv/bin/pip" install --upgrade pip setuptools wheel
-
-    if ! "$INSTALL_DIR/venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"; then
-        print_error "Failed to install Python dependencies."
-        echo "  Try manually: $INSTALL_DIR/venv/bin/pip install -r $INSTALL_DIR/requirements.txt"
-        exit 1
-    fi
-
-    print_success "Python dependencies installed"
+    "$INSTALL_DIR/venv/bin/pip" install --upgrade pip --quiet
+    "$INSTALL_DIR/venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt" --quiet
+    print_success "Dependencies installed"
 }
 
 write_config() {
@@ -289,7 +269,7 @@ if [[ -f "$CONFIG_FILE" ]]; then
     systemctl stop "$SERVICE_NAME" 2>/dev/null || true
 fi
 
-install_system_dependencies
+check_dependencies
 collect_config
 install_bot
 write_config
