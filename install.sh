@@ -20,9 +20,9 @@ REPO_URL="https://github.com/0xsoli/limitless-bot"
 
 print_header() {
     echo ""
-    echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}${BOLD}║    Limitless Trading Bot Installer by solixbt   ║${NC}"
-    echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════════╝${NC}"
+    echo -e "${CYAN}${BOLD}+==================================================+${NC}"
+    echo -e "${CYAN}${BOLD}|     Limitless Trading Bot Installer — solixbt    |${NC}"
+    echo -e "${CYAN}${BOLD}+==================================================+${NC}"
     echo ""
 }
 
@@ -140,22 +140,28 @@ collect_config() {
 install_bot() {
     print_step "Installing bot files"
 
-    mkdir -p "$INSTALL_DIR"
     mkdir -p "$CONFIG_DIR"
     mkdir -p "$LOG_DIR"
 
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || true)"
+    HAS_LOCAL=false
+    if [[ -n "${BASH_SOURCE[0]:-}" && -f "${SCRIPT_DIR}/run.py" ]]; then
+        HAS_LOCAL=true
+    fi
 
-    if [[ -f "$SCRIPT_DIR/run.py" ]]; then
+    if [[ "$HAS_LOCAL" == "true" ]]; then
+        mkdir -p "$INSTALL_DIR"
         cp -r "$SCRIPT_DIR"/* "$INSTALL_DIR/"
         print_success "Files copied from local source"
     else
-        print_warning "Cloning from repository..."
+        print_warning "Fetching latest source from GitHub..."
+        rm -rf "$INSTALL_DIR"
         git clone "$REPO_URL" "$INSTALL_DIR" --quiet
         print_success "Repository cloned"
     fi
 
     print_step "Creating Python virtual environment"
+    rm -rf "$INSTALL_DIR/venv"
     python3 -m venv "$INSTALL_DIR/venv"
     "$INSTALL_DIR/venv/bin/pip" install --upgrade pip --quiet
     "$INSTALL_DIR/venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt" --quiet
@@ -225,21 +231,22 @@ start_service() {
 
 print_completion() {
     echo ""
-    echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}${BOLD}║            Installation Complete! 🎉             ║${NC}"
-    echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════╝${NC}"
+    echo -e "${GREEN}${BOLD}+==================================================+${NC}"
+    echo -e "${GREEN}${BOLD}|              Installation complete               |${NC}"
+    echo -e "${GREEN}${BOLD}+==================================================+${NC}"
     echo ""
     echo -e "  ${BOLD}Useful commands:${NC}"
-    echo -e "  ${CYAN}systemctl status $SERVICE_NAME${NC}      — Check status"
-    echo -e "  ${CYAN}systemctl restart $SERVICE_NAME${NC}     — Restart bot"
-    echo -e "  ${CYAN}systemctl stop $SERVICE_NAME${NC}        — Stop bot"
-    echo -e "  ${CYAN}journalctl -u $SERVICE_NAME -f${NC}      — Live logs"
-    echo -e "  ${CYAN}cat $LOG_DIR/error.log${NC}  — Error log"
+    echo -e "  ${CYAN}systemctl status $SERVICE_NAME${NC}      status"
+    echo -e "  ${CYAN}systemctl restart $SERVICE_NAME${NC}     restart"
+    echo -e "  ${CYAN}systemctl stop $SERVICE_NAME${NC}        stop"
+    echo -e "  ${CYAN}journalctl -u $SERVICE_NAME -f${NC}      live logs"
+    echo -e "  ${CYAN}cat $LOG_DIR/error.log${NC}              error log"
     echo ""
     echo -e "  ${BOLD}Config file:${NC}  $CONFIG_FILE"
     echo -e "  ${BOLD}Install dir:${NC}  $INSTALL_DIR"
     echo ""
-    echo -e "  ${YELLOW}Open Telegram and send /start to your bot!${NC}"
+    echo -e "  ${YELLOW}Open Telegram and send /start to your bot.${NC}"
+    echo -e "  ${YELLOW}Ensure your profile is in EOA mode and USDC is approved on Base.${NC}"
     echo ""
 }
 
