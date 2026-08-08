@@ -1,20 +1,18 @@
-import asyncio
 import logging
-import os
 import sys
 
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
+from .config import load_config
 from .handlers import (
-    start_handler,
-    menu_handler,
+    callback_handler,
     market_handler,
+    menu_handler,
+    message_handler,
     order_handler,
     portfolio_handler,
-    callback_handler,
-    message_handler,
+    start_handler,
 )
-from .config import load_config
 from .limitless_client import LimitlessClient
 from .websocket_manager import WebSocketManager
 
@@ -28,7 +26,23 @@ logger = logging.getLogger("limitless-bot")
 
 async def post_init(application: Application) -> None:
     config = application.bot_data["config"]
-    client = LimitlessClient(config["api_key"], config["api_secret"])
+    client = LimitlessClient(
+        config["api_key"],
+        config["api_secret"],
+        private_key=config.get("wallet_private_key", ""),
+    )
+    try:
+        profile = await client.ensure_ready()
+        logger.info(
+            "Profile ready: id=%s account=%s feeRateBps=%s tradeWalletOption=%s",
+            profile.get("id"),
+            profile.get("account"),
+            (profile.get("rank") or {}).get("feeRateBps"),
+            profile.get("tradeWalletOption"),
+        )
+    except Exception as e:
+        logger.warning("Profile preflight failed (orders may still work after first attempt): %s", e)
+
     ws_manager = WebSocketManager(config["api_key"], application.bot)
     application.bot_data["client"] = client
     application.bot_data["ws_manager"] = ws_manager
@@ -41,6 +55,9 @@ async def post_shutdown(application: Application) -> None:
     ws_manager = application.bot_data.get("ws_manager")
     if ws_manager:
         await ws_manager.disconnect()
+    client = application.bot_data.get("client")
+    if client:
+        await client.close()
     logger.info("Bot shut down cleanly")
 
 
