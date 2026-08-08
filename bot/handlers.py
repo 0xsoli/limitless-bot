@@ -1,39 +1,32 @@
 import logging
 from typing import Optional
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes
+from telegram import Update
 from telegram.constants import ParseMode
+from telegram.ext import ContextTypes
 
-from .keyboards import (
-    main_menu_keyboard,
-    timeframe_keyboard,
-    football_league_keyboard,
-    football_group_keyboard,
-    market_list_keyboard,
-    order_type_keyboard,
-    confirm_keyboard,
-    portfolio_keyboard,
-    back_keyboard,
-)
 from .formatters import (
+    format_history,
     format_market_info,
+    format_order_result,
     format_orderbook,
     format_portfolio,
     format_positions,
-    format_history,
-    format_order_result,
+)
+from .keyboards import (
+    back_keyboard,
+    categories_keyboard,
+    confirm_keyboard,
+    filters_keyboard,
+    group_markets_keyboard,
+    main_menu_keyboard,
+    market_actions_keyboard,
+    market_list_keyboard,
+    order_type_keyboard,
+    portfolio_keyboard,
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _derive_address(private_key: str) -> str:
-    try:
-        from eth_account import Account
-        return Account.from_key(private_key).address
-    except Exception:
-        return ""
 
 
 def get_client(context: ContextTypes.DEFAULT_TYPE):
@@ -50,12 +43,13 @@ def is_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
 
 async def reject(update: Update) -> None:
     logger.warning(
-        f"Unauthorized access attempt from user_id={update.effective_user.id if update.effective_user else 'unknown'}"
+        "Unauthorized access attempt from user_id=%s",
+        update.effective_user.id if update.effective_user else "unknown",
     )
     if update.message:
-        await update.message.reply_text("⛔ You are not authorized to use this bot.")
+        await update.message.reply_text("You are not authorized to use this bot.")
     elif update.callback_query:
-        await update.callback_query.answer("⛔ Unauthorized.", show_alert=True)
+        await update.callback_query.answer("Unauthorized.", show_alert=True)
 
 
 def get_session(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> dict:
@@ -65,16 +59,25 @@ def get_session(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> dict:
     return sessions[user_id]
 
 
+def _back_to_markets(session: dict) -> str:
+    if session.get("page_id"):
+        return "reload_markets"
+    if session.get("category_slug"):
+        return f"cat_{session['category_slug']}"
+    return "menu_market"
+
+
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update, context):
         await reject(update)
         return
     user = update.effective_user
     text = (
-        f"👋 Welcome, <b>{user.first_name}</b>!\n\n"
-        "🏦 <b>Limitless Exchange Trading Bot</b>\n\n"
-        "Trade prediction markets on Limitless Exchange directly from Telegram.\n\n"
-        "Use the menu below to get started:"
+        f"Welcome, <b>{user.first_name}</b>!\n\n"
+        "<b>Limitless Exchange Trading Bot</b>\n\n"
+        "Browse every active market category, place buy and sell orders, "
+        "and manage your portfolio from Telegram.\n\n"
+        "Your keys stay on this server."
     )
     await update.message.reply_text(
         text,
@@ -88,7 +91,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await reject(update)
         return
     await update.message.reply_text(
-        "📋 <b>Main Menu</b>",
+        "<b>Main Menu</b>",
         parse_mode=ParseMode.HTML,
         reply_markup=main_menu_keyboard(),
     )
@@ -98,11 +101,7 @@ async def market_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update, context):
         await reject(update)
         return
-    await update.message.reply_text(
-        "📊 <b>Market Browser</b>\n\nSelect a timeframe to browse active markets:",
-        parse_mode=ParseMode.HTML,
-        reply_markup=timeframe_keyboard(),
-    )
+    await _show_categories(update, context, edit=False)
 
 
 async def order_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -113,7 +112,7 @@ async def order_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session = get_session(context, user_id)
     if not session.get("selected_market"):
         await update.message.reply_text(
-            "⚠️ Please select a market first.\n\nUse /market to browse markets.",
+            "Select a market first from the Markets menu.",
             reply_markup=back_keyboard(),
         )
         return
@@ -124,353 +123,511 @@ async def portfolio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update, context):
         await reject(update)
         return
-    client = get_client(context)
-    config = context.application.bot_data["config"]
-    msg = await update.message.reply_text("⏳ Loading portfolio...")
+    msg = await update.message.reply_text("Loading portfolio...")
     try:
-        wallet = _derive_address(config.get("wallet_private_key", ""))
-        positions = await client.get_portfolio_positions()
-        profile = await client.get_profile(wallet) if wallet else {}
-        pnl = await client.get_pnl_chart()
-        points = await client.get_points()
-        text = format_portfolio(profile, positions, pnl, points)
+        text = await _load_portfolio_text(context)
         await msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=portfolio_keyboard())
     except Exception as e:
-        logger.error(f"Portfolio error: {e}")
-        await msg.edit_text("❌ Failed to load portfolio. Please try again.", reply_markup=back_keyboard())
+        logger.error("Portfolio error: %s", e)
+        await msg.edit_text(f"Failed to load portfolio: {str(e)[:180]}", reply_markup=back_keyboard())
+
+
+async def _load_portfolio_text(context: ContextTypes.DEFAULT_TYPE) -> str:
+    client = get_client(context)
+    try:
+        profile = await client.get_profile_me()
+    except Exception:
+        profile = {}
+        if client.address:
+            try:
+                profile = await client.get_profile(client.address)
+            except Exception:
+                profile = {}
+    positions = await client.get_portfolio_positions()
+    pnl = await client.get_pnl_chart()
+    points = await client.get_points()
+    return format_portfolio(profile, positions, pnl, points)
+
+
+async def _show_categories(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = True):
+    client = get_client(context)
+    query = update.callback_query if edit else None
+    if query:
+        await query.edit_message_text("Loading categories...")
+    try:
+        categories = await client.get_navigation()
+        if not isinstance(categories, list):
+            categories = []
+        text = (
+            "<b>Market Categories</b>\n\n"
+            "Select a category to browse all active Limitless markets."
+        )
+        markup = categories_keyboard(categories)
+        if query:
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        else:
+            await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+    except Exception as e:
+        logger.error("Categories error: %s", e)
+        err = f"Failed to load categories: {str(e)[:180]}"
+        if query:
+            await query.edit_message_text(err, reply_markup=back_keyboard())
+        else:
+            await update.message.reply_text(err, reply_markup=back_keyboard())
 
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update, context):
         await reject(update)
         return
+
     query = update.callback_query
     await query.answer()
-    data = query.data
+    data = query.data or ""
     user_id = update.effective_user.id
     session = get_session(context, user_id)
+    client = get_client(context)
 
     if data == "menu_main":
         await query.edit_message_text(
-            "📋 <b>Main Menu</b>",
+            "<b>Main Menu</b>",
             parse_mode=ParseMode.HTML,
             reply_markup=main_menu_keyboard(),
         )
+        return
 
-    elif data == "menu_market":
-        await query.edit_message_text(
-            "📊 <b>Market Browser</b>\n\nSelect a timeframe:",
-            parse_mode=ParseMode.HTML,
-            reply_markup=timeframe_keyboard(),
-        )
+    if data == "menu_market":
+        await _show_categories(update, context, edit=True)
+        return
 
-    elif data == "menu_portfolio":
-        await query.edit_message_text("⏳ Loading portfolio...")
-        client = get_client(context)
-        config = context.application.bot_data["config"]
+    if data == "menu_portfolio":
+        await query.edit_message_text("Loading portfolio...")
         try:
-            wallet = _derive_address(config.get("wallet_private_key", ""))
-            positions = await client.get_portfolio_positions()
-            profile = await client.get_profile(wallet) if wallet else {}
-            pnl = await client.get_pnl_chart()
-            points = await client.get_points()
-            text = format_portfolio(profile, positions, pnl, points)
+            text = await _load_portfolio_text(context)
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=portfolio_keyboard())
         except Exception as e:
-            logger.error(f"Portfolio callback error: {e}")
-            await query.edit_message_text("❌ Failed to load portfolio.", reply_markup=back_keyboard())
+            logger.error("Portfolio callback error: %s", e)
+            await query.edit_message_text(
+                f"Failed to load portfolio: {str(e)[:180]}",
+                reply_markup=back_keyboard(),
+            )
+        return
 
-    elif data == "menu_positions":
-        await query.edit_message_text("⏳ Loading positions...")
-        client = get_client(context)
+    if data == "menu_positions":
+        await query.edit_message_text("Loading positions...")
         try:
             positions = await client.get_portfolio_positions()
             text = format_positions(positions)
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=portfolio_keyboard())
         except Exception as e:
-            logger.error(f"Positions error: {e}")
-            await query.edit_message_text("❌ Failed to load positions.", reply_markup=back_keyboard())
+            logger.error("Positions error: %s", e)
+            await query.edit_message_text(
+                f"Failed to load positions: {str(e)[:180]}",
+                reply_markup=back_keyboard(),
+            )
+        return
 
-    elif data == "menu_history":
-        await query.edit_message_text("⏳ Loading trade history...")
-        client = get_client(context)
+    if data == "menu_history":
+        await query.edit_message_text("Loading trade history...")
         try:
             history = await client.get_portfolio_history()
             text = format_history(history)
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=portfolio_keyboard())
         except Exception as e:
-            logger.error(f"History error: {e}")
-            await query.edit_message_text("❌ Failed to load history.", reply_markup=back_keyboard())
-
-    elif data == "noop":
-        await query.answer()
-
-    elif data == "tf_football":
-        session["market_source"] = "football"
-        await query.edit_message_text("⏳ Loading football categories...")
-        client = get_client(context)
-        try:
-            sport_page = await client.get_market_page_by_path("/sport")
-            football_group = next(
-                (g for g in sport_page.get("filterGroups", []) if g.get("slug") == "football"),
-                None,
-            )
-            options = []
-            if football_group:
-                options.extend(football_group.get("options", []))
-                tabs = football_group.get("tabs", {})
-                for tab in tabs.get("options", []):
-                    if tab.get("count", 0) > 0:
-                        options.append(tab)
-            if not options:
-                options = [{"label": "FIFA World Cup", "value": "fifa-world-cup", "count": 1}]
+            logger.error("History error: %s", e)
             await query.edit_message_text(
-                "⚽ <b>Football Markets</b>\n\nSelect a league or category:",
-                parse_mode=ParseMode.HTML,
-                reply_markup=football_league_keyboard(options),
+                f"Failed to load history: {str(e)[:180]}",
+                reply_markup=back_keyboard(),
             )
-        except Exception as e:
-            logger.error(f"Football menu error: {e}")
-            await query.edit_message_text("❌ Failed to load football categories.", reply_markup=back_keyboard())
+        return
 
-    elif data.startswith("fbpage_"):
-        parts = data[8:].rsplit("_", 1)
-        if len(parts) != 2:
-            await query.edit_message_text("❌ Invalid page.", reply_markup=back_keyboard())
+    if data == "noop":
+        return
+
+    if data == "back":
+        await query.edit_message_text(
+            "<b>Main Menu</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    if data.startswith("cat_"):
+        slug = data[4:]
+        await _open_category(query, context, session, slug)
+        return
+
+    if data.startswith("filt_"):
+        await _apply_filter(query, context, session, data[5:])
+        return
+
+    if data == "reload_markets":
+        await _load_markets_page(query, context, session, session.get("market_page", 1))
+        return
+
+    if data.startswith("mp_"):
+        page = int(data[3:])
+        await _load_markets_page(query, context, session, page)
+        return
+
+    if data.startswith("mkt_"):
+        idx = int(data[4:])
+        markets = session.get("market_list") or []
+        if idx < 0 or idx >= len(markets):
+            await query.edit_message_text("Market expired from list. Please browse again.", reply_markup=back_keyboard("menu_market"))
             return
-        filter_key, page_str = parts
-        await _show_football_markets(query, context, session, filter_key, int(page_str))
+        market = markets[idx]
+        await _open_market(query, context, session, market.get("slug", ""))
+        return
 
-    elif data.startswith("fb_"):
-        filter_key = data[3:]
-        session["football_filter"] = filter_key
-        session["market_source"] = "football"
-        await _show_football_markets(query, context, session, filter_key, 1)
+    if data.startswith("grp_"):
+        idx = int(data[4:])
+        markets = session.get("market_list") or []
+        if idx < 0 or idx >= len(markets):
+            await query.edit_message_text("Group expired from list. Please browse again.", reply_markup=back_keyboard("menu_market"))
+            return
+        market = markets[idx]
+        await _open_group(query, context, session, market.get("slug", ""))
+        return
 
-    elif data.startswith("fbgroup_"):
-        slug = data[8:]
-        session["market_source"] = "football"
-        await query.edit_message_text("⏳ Loading match outcomes...")
-        client = get_client(context)
-        try:
-            group_market = await client.get_market(slug)
-            session["selected_group"] = slug
-            title = group_market.get("title", slug)
-            back_callback = f"fb_{session.get('football_filter', 'fifa-world-cup')}"
-            await query.edit_message_text(
-                f"⚽ <b>{title}</b>\n\nSelect an outcome to trade:",
-                parse_mode=ParseMode.HTML,
-                reply_markup=football_group_keyboard(group_market, back_callback),
-            )
-        except Exception as e:
-            logger.error(f"Football group error: {e}")
-            await query.edit_message_text("❌ Failed to load match outcomes.", reply_markup=back_keyboard())
+    if data.startswith("sub_"):
+        idx = int(data[4:])
+        group = session.get("group_data") or {}
+        submarkets = group.get("markets") or []
+        if idx < 0 or idx >= len(submarkets):
+            await query.edit_message_text("Outcome expired. Please open the group again.", reply_markup=back_keyboard("menu_market"))
+            return
+        await _open_market(query, context, session, submarkets[idx].get("slug", ""))
+        return
 
-    elif data.startswith("tf_"):
-        timeframe = data[3:]
-        session["timeframe"] = timeframe
-        session["market_source"] = "crypto"
-        await query.edit_message_text("⏳ Loading markets...")
-        client = get_client(context)
-        try:
-            markets_data = await client.get_active_markets(limit=20)
-            markets = markets_data.get("data", [])
-            category_filter = {"5m": "5 min", "15m": "15 min", "1h": "hourly", "1d": "daily"}
-            target_label = category_filter.get(timeframe, "").lower()
-            if target_label:
-                filtered = [
-                    m for m in markets
-                    if any(target_label in str(c).lower() for c in m.get("categories", []) + m.get("tags", []))
-                ]
-                if not filtered:
-                    filtered = markets
-            else:
-                filtered = markets
-            filtered = filtered[:20]
-            session["market_list"] = filtered
-            tf_labels = {"5m": "5 Min", "15m": "15 Min", "1h": "Hourly", "1d": "Daily"}
-            tf_label = tf_labels.get(timeframe, timeframe)
-            await query.edit_message_text(
-                f"📊 <b>Active Markets — {tf_label}</b>\n\nSelect a market:",
-                parse_mode=ParseMode.HTML,
-                reply_markup=market_list_keyboard(filtered),
-            )
-        except Exception as e:
-            logger.error(f"Market list error: {e}")
-            await query.edit_message_text("❌ Failed to load markets.", reply_markup=back_keyboard())
-
-    elif data.startswith("market_"):
-        slug = data[7:]
-        session["selected_market"] = slug
-        await query.edit_message_text("⏳ Loading market details...")
-        client = get_client(context)
-        try:
-            market = await client.get_market(slug)
-            orderbook = await client.get_orderbook(slug)
-            session["market_data"] = market
-            text = format_market_info(market, orderbook)
-            back_callback = _market_back_callback(session)
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("🟢 Buy YES", callback_data=f"trade_buy_yes_{slug}"),
-                    InlineKeyboardButton("🔴 Buy NO", callback_data=f"trade_buy_no_{slug}"),
-                ],
-                [InlineKeyboardButton("📖 Full Orderbook", callback_data=f"orderbook_{slug}")],
-                [InlineKeyboardButton("◀️ Back to Markets", callback_data=back_callback)],
-            ])
-            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
-        except Exception as e:
-            logger.error(f"Market detail error: {e}")
-            await query.edit_message_text("❌ Failed to load market.", reply_markup=back_keyboard())
-
-    elif data.startswith("orderbook_"):
-        slug = data[10:]
-        await query.edit_message_text("⏳ Loading orderbook...")
-        client = get_client(context)
+    if data == "orderbook":
+        slug = session.get("selected_market")
+        if not slug:
+            await query.edit_message_text("No market selected.", reply_markup=back_keyboard("menu_market"))
+            return
+        await query.edit_message_text("Loading orderbook...")
         try:
             orderbook = await client.get_orderbook(slug)
             text = format_orderbook(orderbook, slug)
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("🟢 Buy YES", callback_data=f"trade_buy_yes_{slug}"),
-                    InlineKeyboardButton("🔴 Buy NO", callback_data=f"trade_buy_no_{slug}"),
-                ],
-                [InlineKeyboardButton("◀️ Back", callback_data=f"market_{slug}")],
-            ])
-            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+            await query.edit_message_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=market_actions_keyboard(_back_to_markets(session)),
+            )
         except Exception as e:
-            logger.error(f"Orderbook error: {e}")
-            await query.edit_message_text("❌ Failed to load orderbook.", reply_markup=back_keyboard())
+            logger.error("Orderbook error: %s", e)
+            await query.edit_message_text(f"Failed to load orderbook: {str(e)[:180]}", reply_markup=back_keyboard())
+        return
 
-    elif data.startswith("trade_"):
+    if data.startswith("trade_"):
         parts = data.split("_")
-        outcome = parts[2]
-        slug = "_".join(parts[3:])
-        session["trade_side"] = "BUY"
-        session["trade_outcome"] = outcome.upper()
-        session["selected_market"] = slug
+        if len(parts) < 3:
+            await query.edit_message_text("Invalid trade action.", reply_markup=back_keyboard())
+            return
+        session["trade_side"] = parts[1].upper()
+        session["trade_outcome"] = parts[2].upper()
         await _show_order_type(update, context, edit=True)
+        return
 
-    elif data.startswith("ordertype_"):
-        order_type = data[10:]
+    if data.startswith("ordertype_"):
+        order_type = data[10:].upper()
         session["order_type"] = order_type
         slug = session.get("selected_market", "")
         outcome = session.get("trade_outcome", "YES")
+        side = session.get("trade_side", "BUY")
         if order_type == "FOK":
             session["awaiting_input"] = "maker_amount"
+            amount_label = "USDC amount to spend" if side == "BUY" else "number of shares to sell"
             await query.edit_message_text(
-                f"💰 <b>Market Order (FOK)</b>\n\n"
+                f"<b>Market Order (FOK)</b>\n\n"
                 f"Market: <code>{slug}</code>\n"
-                f"Outcome: <b>{outcome}</b>\n\n"
-                f"Enter the USDC amount to spend (e.g. <code>10</code>):",
+                f"Side: <b>{side} {outcome}</b>\n\n"
+                f"Enter the {amount_label} (e.g. <code>10</code>):",
                 parse_mode=ParseMode.HTML,
-                reply_markup=back_keyboard(),
+                reply_markup=back_keyboard("menu_market"),
             )
         else:
             session["awaiting_input"] = "price"
             await query.edit_message_text(
-                f"💲 <b>{order_type} Order</b>\n\n"
+                f"<b>{order_type} Order</b>\n\n"
                 f"Market: <code>{slug}</code>\n"
-                f"Outcome: <b>{outcome}</b>\n\n"
+                f"Side: <b>{side} {outcome}</b>\n\n"
                 f"Enter the price (0.01 – 0.99):",
                 parse_mode=ParseMode.HTML,
-                reply_markup=back_keyboard(),
+                reply_markup=back_keyboard("menu_market"),
             )
+        return
 
-    elif data == "confirm_order":
+    if data == "confirm_order":
         await _execute_order(update, context, query=query)
+        return
 
-    elif data == "cancel_order":
+    if data == "cancel_order":
         session.pop("pending_order", None)
         session.pop("awaiting_input", None)
-        await query.edit_message_text("❌ Order cancelled.", reply_markup=main_menu_keyboard())
+        await query.edit_message_text("Order cancelled.", reply_markup=main_menu_keyboard())
+        return
 
-    elif data.startswith("cancel_order_id_"):
+    if data.startswith("cancel_order_id_"):
         order_id = data[16:]
-        await query.edit_message_text("⏳ Cancelling order...")
-        client = get_client(context)
+        await query.edit_message_text("Cancelling order...")
         try:
             await client.cancel_order(order_id)
-            await query.edit_message_text("✅ Order cancelled successfully.", reply_markup=back_keyboard())
+            await query.edit_message_text("Order cancelled successfully.", reply_markup=back_keyboard())
         except Exception as e:
-            logger.error(f"Cancel order error: {e}")
-            await query.edit_message_text("❌ Failed to cancel order.", reply_markup=back_keyboard())
+            logger.error("Cancel order error: %s", e)
+            await query.edit_message_text(f"Failed to cancel order: {str(e)[:180]}", reply_markup=back_keyboard())
+        return
 
-    elif data == "cancel_all_orders":
-        await query.edit_message_text("⏳ Cancelling all orders...")
-        client = get_client(context)
-        try:
-            await client.cancel_all_orders()
-            await query.edit_message_text("✅ All orders cancelled.", reply_markup=back_keyboard())
-        except Exception as e:
-            logger.error(f"Cancel all error: {e}")
-            await query.edit_message_text("❌ Failed to cancel orders.", reply_markup=back_keyboard())
-
-    elif data == "back":
-        await query.edit_message_text(
-            "📋 <b>Main Menu</b>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_menu_keyboard(),
-        )
-
-
-def _market_back_callback(session: dict) -> str:
-    if session.get("market_source") == "football":
-        return f"fb_{session.get('football_filter', 'fifa-world-cup')}"
-    return f"tf_{session.get('timeframe', '1h')}"
-
-
-def _football_filter_label(filter_key: str) -> str:
-    labels = {
-        "all": "All Football",
-        "fifa-world-cup": "FIFA World Cup",
-        "matches": "Matches",
-        "props": "Props",
-        "player-props": "Player Props",
-        "off-the-pitch": "Off the Pitch",
-        "england-premier-league": "Premier League",
-        "uefa-champions-league": "Champions League",
-        "spain-laliga": "La Liga",
-        "italy-serie-a": "Serie A",
-        "bundesliga": "Bundesliga",
-    }
-    return labels.get(filter_key, filter_key.replace("-", " ").title())
-
-
-async def _show_football_markets(query, context, session, filter_key: str, page: int):
-    await query.edit_message_text("⏳ Loading football markets...")
-    client = get_client(context)
-    try:
-        result = await client.get_football_markets(filter_key=filter_key, page=page, limit=15)
-        markets = result.get("data", [])
-        pagination = result.get("pagination", {})
-        total_pages = pagination.get("totalPages", 1)
-        session["market_list"] = markets
-        session["football_filter"] = filter_key
-        session["football_page"] = page
-        session["market_source"] = "football"
-        label = _football_filter_label(filter_key)
-        if not markets:
+    if data == "cancel_all_orders":
+        slug = session.get("selected_market")
+        if not slug:
             await query.edit_message_text(
-                f"⚽ <b>{label}</b>\n\nNo active football markets found.",
+                "Open a market first, then cancel all open orders on that market.",
+                reply_markup=back_keyboard("menu_market"),
+            )
+            return
+        await query.edit_message_text(f"Cancelling all orders on {slug}...")
+        try:
+            await client.cancel_all_orders(slug)
+            await query.edit_message_text(
+                f"All open orders cancelled on\n<code>{slug}</code>",
                 parse_mode=ParseMode.HTML,
                 reply_markup=back_keyboard(),
             )
+        except Exception as e:
+            logger.error("Cancel all error: %s", e)
+            await query.edit_message_text(f"Failed to cancel orders: {str(e)[:180]}", reply_markup=back_keyboard())
+        return
+
+
+async def _open_category(query, context, session: dict, slug: str):
+    client = get_client(context)
+    await query.edit_message_text("Loading category...")
+    try:
+        session["category_slug"] = slug
+        session["active_filters"] = {}
+        session["filter_options"] = []
+        session["market_page"] = 1
+
+        if slug == "all":
+            session["page_id"] = None
+            session["category_path"] = None
+            session["category_name"] = "All Markets"
+            await _load_markets_page(query, context, session, 1)
             return
+
+        path = f"/{slug}" if not slug.startswith("/") else slug
+        page = await client.get_market_page_by_path(path)
+        session["page_id"] = page.get("id")
+        session["category_path"] = path
+        session["category_name"] = page.get("name") or slug
+
+        options = _extract_filter_options(page)
+        session["filter_options"] = options
+        if options:
+            await query.edit_message_text(
+                f"<b>{session['category_name']}</b>\n\n"
+                f"Total markets: <b>{page.get('totalCount', '—')}</b>\n\n"
+                "Select a subcategory or show all:",
+                parse_mode=ParseMode.HTML,
+                reply_markup=filters_keyboard(options, back_callback="menu_market"),
+            )
+        else:
+            await _load_markets_page(query, context, session, 1)
+    except Exception as e:
+        logger.error("Open category error: %s", e)
+        await query.edit_message_text(f"Failed to load category: {str(e)[:180]}", reply_markup=back_keyboard("menu_market"))
+
+
+def _extract_filter_options(page: dict) -> list:
+    options = []
+    for group in page.get("filterGroups") or []:
+        source = group.get("source") or {}
+        source_type = source.get("type")
+        property_slug = None
+        if source_type == "property":
+            property_slug = source.get("propertySlug")
+        elif source_type == "custom":
+            continue
+        group_name = group.get("name") or group.get("slug") or ""
+        for option in group.get("options") or []:
+            count = option.get("count")
+            if count is not None and int(count) <= 0:
+                continue
+            value = option.get("value")
+            if not value:
+                continue
+            label = option.get("label") or value
+            if group_name:
+                label = f"{group_name}: {label}"
+            prop = property_slug or group.get("slug")
+            if not prop:
+                continue
+            options.append({
+                "label": label,
+                "value": value,
+                "count": count,
+                "property_slug": prop,
+                "group_slug": group.get("slug"),
+            })
+        for tab in ((group.get("tabs") or {}).get("options") or []):
+            count = tab.get("count")
+            if count is not None and int(count) <= 0:
+                continue
+            value = tab.get("value")
+            if not value:
+                continue
+            prop = property_slug or group.get("slug")
+            if not prop:
+                continue
+            label = tab.get("label") or value
+            options.append({
+                "label": label,
+                "value": value,
+                "count": count,
+                "property_slug": prop,
+                "group_slug": group.get("slug"),
+            })
+    return options
+
+
+async def _apply_filter(query, context, session: dict, token: str):
+    if token == "all":
+        session["active_filters"] = {}
+        session["filter_label"] = "All"
+    else:
+        try:
+            idx = int(token)
+        except ValueError:
+            await query.edit_message_text("Invalid filter.", reply_markup=back_keyboard("menu_market"))
+            return
+        options = session.get("filter_options") or []
+        if idx < 0 or idx >= len(options):
+            await query.edit_message_text("Filter expired. Open the category again.", reply_markup=back_keyboard("menu_market"))
+            return
+        option = options[idx]
+        prop = option.get("property_slug")
+        if not prop:
+            await query.edit_message_text("Filter is missing a property key.", reply_markup=back_keyboard("menu_market"))
+            return
+        session["active_filters"] = {prop: option["value"]}
+        session["filter_label"] = option.get("label") or option["value"]
+    await _load_markets_page(query, context, session, 1)
+
+
+async def _load_markets_page(query, context, session: dict, page: int):
+    client = get_client(context)
+    await query.edit_message_text("Loading markets...")
+    try:
+        page_id = session.get("page_id")
+        filters = session.get("active_filters") or {}
+        if page_id:
+            result = await client.get_page_markets(
+                page_id,
+                page=page,
+                limit=15,
+                filters=filters or None,
+            )
+            markets = result.get("data") or []
+            pagination = result.get("pagination") or {}
+            total_pages = int(pagination.get("totalPages") or 1)
+            total = pagination.get("total") or len(markets)
+        else:
+            result = await client.get_active_markets(page=page, limit=15)
+            markets = result.get("data") or []
+            total = int(result.get("totalMarketsCount") or len(markets))
+            total_pages = max(1, (total + 14) // 15)
+
+        session["market_list"] = markets
+        session["market_page"] = page
+        session["market_total_pages"] = total_pages
+
+        name = session.get("category_name") or "Markets"
+        filter_label = session.get("filter_label")
+        title = f"<b>{name}</b>"
+        if filter_label:
+            title += f"\nFilter: <b>{filter_label}</b>"
+        title += f"\n\nPage {page}/{total_pages} · {total} markets\nSelect a market:"
+
+        back_cb = "menu_market"
+        if session.get("filter_options") and page_id:
+            back_cb = f"cat_{session.get('category_slug', '')}"
+
+        if not markets:
+            await query.edit_message_text(
+                f"{title}\n\nNo markets found.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=back_keyboard(back_cb),
+            )
+            return
+
         await query.edit_message_text(
-            f"⚽ <b>Football — {label}</b>\n\nSelect a market:",
+            title,
             parse_mode=ParseMode.HTML,
             reply_markup=market_list_keyboard(
                 markets,
-                back_callback="tf_football",
+                back_callback=back_cb,
                 page=page,
                 total_pages=total_pages,
-                page_callback_prefix=f"fbpage_{filter_key}_",
             ),
         )
     except Exception as e:
-        logger.error(f"Football market list error: {e}")
-        await query.edit_message_text("❌ Failed to load football markets.", reply_markup=back_keyboard())
+        logger.error("Load markets error: %s", e)
+        await query.edit_message_text(
+            f"Failed to load markets: {str(e)[:180]}",
+            reply_markup=back_keyboard("menu_market"),
+        )
+
+
+async def _open_group(query, context, session: dict, slug: str):
+    client = get_client(context)
+    await query.edit_message_text("Loading group market...")
+    try:
+        group_market = await client.get_market(slug)
+        session["group_data"] = group_market
+        session["selected_group"] = slug
+        title = group_market.get("title") or slug
+        await query.edit_message_text(
+            f"<b>{title}</b>\n\nSelect an outcome market:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=group_markets_keyboard(group_market, _back_to_markets(session)),
+        )
+    except Exception as e:
+        logger.error("Group market error: %s", e)
+        await query.edit_message_text(
+            f"Failed to load group: {str(e)[:180]}",
+            reply_markup=back_keyboard("menu_market"),
+        )
+
+
+async def _open_market(query, context, session: dict, slug: str):
+    client = get_client(context)
+    if not slug:
+        await query.edit_message_text("Invalid market.", reply_markup=back_keyboard("menu_market"))
+        return
+    await query.edit_message_text("Loading market details...")
+    try:
+        market = await client.get_market(slug)
+        orderbook = {}
+        try:
+            orderbook = await client.get_orderbook(slug)
+        except Exception as e:
+            logger.warning("Orderbook unavailable for %s: %s", slug, e)
+        session["selected_market"] = slug
+        session["market_data"] = market
+        text = format_market_info(market, orderbook)
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=market_actions_keyboard(_back_to_markets(session)),
+        )
+    except Exception as e:
+        logger.error("Market detail error: %s", e)
+        await query.edit_message_text(
+            f"Failed to load market: {str(e)[:180]}",
+            reply_markup=back_keyboard("menu_market"),
+        )
 
 
 async def _show_order_type(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = False):
@@ -479,10 +636,11 @@ async def _show_order_type(update: Update, context: ContextTypes.DEFAULT_TYPE, e
     session = get_session(context, user_id)
     slug = session.get("selected_market", "unknown")
     outcome = session.get("trade_outcome", "YES")
+    side = session.get("trade_side", "BUY")
     text = (
-        f"📋 <b>Place Order</b>\n\n"
+        f"<b>Place Order</b>\n\n"
         f"Market: <code>{slug}</code>\n"
-        f"Outcome: <b>{outcome}</b>\n\n"
+        f"Side: <b>{side} {outcome}</b>\n\n"
         f"Select order type:"
     )
     if edit and query:
@@ -503,7 +661,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Use /menu to open the main menu.", reply_markup=main_menu_keyboard())
         return
 
-    text = update.message.text.strip()
+    text = (update.message.text or "").strip()
 
     if awaiting == "price":
         try:
@@ -513,14 +671,15 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             session["trade_price"] = price
             session["awaiting_input"] = "size"
             await update.message.reply_text(
-                f"📦 Price set to <b>{price}</b>\n\nNow enter the number of contracts (e.g. <code>10</code>):",
+                f"Price set to <b>{price}</b>\n\nNow enter the number of contracts (e.g. <code>10</code>):",
                 parse_mode=ParseMode.HTML,
-                reply_markup=back_keyboard(),
+                reply_markup=back_keyboard("menu_market"),
             )
         except ValueError:
-            await update.message.reply_text("⚠️ Invalid price. Enter a number between 0.01 and 0.99.")
+            await update.message.reply_text("Invalid price. Enter a number between 0.01 and 0.99.")
+        return
 
-    elif awaiting == "size":
+    if awaiting == "size":
         try:
             size = float(text)
             if size <= 0:
@@ -529,9 +688,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             session["awaiting_input"] = None
             await _show_order_confirmation(update, context)
         except ValueError:
-            await update.message.reply_text("⚠️ Invalid size. Enter a positive number.")
+            await update.message.reply_text("Invalid size. Enter a positive number.")
+        return
 
-    elif awaiting == "maker_amount":
+    if awaiting == "maker_amount":
         try:
             amount = float(text)
             if amount <= 0:
@@ -540,7 +700,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             session["awaiting_input"] = None
             await _show_order_confirmation(update, context)
         except ValueError:
-            await update.message.reply_text("⚠️ Invalid amount. Enter a positive number.")
+            await update.message.reply_text("Invalid amount. Enter a positive number.")
+        return
 
 
 async def _show_order_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -552,19 +713,19 @@ async def _show_order_confirmation(update: Update, context: ContextTypes.DEFAULT
     side = session.get("trade_side", "BUY")
     if order_type == "FOK":
         amount = session.get("trade_maker_amount", 0)
-        details = f"Amount: <b>{amount} USDC</b>"
+        unit = "USDC" if side == "BUY" else "shares"
+        details = f"Amount: <b>{amount} {unit}</b>"
     else:
         price = session.get("trade_price", 0)
         size = session.get("trade_size", 0)
         details = f"Price: <b>{price}</b>\nSize: <b>{size} contracts</b>"
     text = (
-        f"✅ <b>Confirm Order</b>\n\n"
+        f"<b>Confirm Order</b>\n\n"
         f"Market: <code>{slug}</code>\n"
-        f"Outcome: <b>{outcome}</b>\n"
+        f"Side: <b>{side} {outcome}</b>\n"
         f"Type: <b>{order_type}</b>\n"
-        f"Side: <b>{side}</b>\n"
         f"{details}\n\n"
-        f"Do you want to place this order?"
+        f"Place this order?"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=confirm_keyboard())
 
@@ -577,40 +738,45 @@ async def _execute_order(update: Update, context: ContextTypes.DEFAULT_TYPE, que
     outcome = session.get("trade_outcome", "YES")
     order_type = session.get("order_type", "GTC")
     side = session.get("trade_side", "BUY")
+
+    if not slug:
+        text = "No market selected."
+        if query:
+            await query.edit_message_text(text, reply_markup=back_keyboard())
+        return
+
     if query:
-        await query.edit_message_text("⏳ Placing order...")
+        await query.edit_message_text("Signing and placing order...")
+
     try:
         market_data = session.get("market_data")
-        if not market_data:
+        if not market_data or market_data.get("slug") != slug:
             market_data = await client.get_market(slug)
             session["market_data"] = market_data
-        tokens = market_data.get("tokens", market_data.get("positionIds", {}))
-        if isinstance(tokens, dict):
-            token_id = tokens.get("yes" if outcome == "YES" else "no", "")
-        elif isinstance(tokens, list):
-            token_id = tokens[0] if outcome == "YES" else (tokens[1] if len(tokens) > 1 else tokens[0])
-        else:
-            token_id = str(tokens)
-        payload = {
-            "marketSlug": slug,
-            "orderType": order_type,
-            "args": {"tokenId": token_id, "side": side},
+
+        kwargs = {
+            "market_slug": slug,
+            "outcome": outcome,
+            "side": side,
+            "order_type": order_type,
+            "market": market_data,
         }
         if order_type == "FOK":
-            payload["args"]["makerAmount"] = session.get("trade_maker_amount")
+            kwargs["maker_amount"] = session.get("trade_maker_amount")
         else:
-            payload["args"]["price"] = session.get("trade_price")
-            payload["args"]["size"] = session.get("trade_size")
-        result = await client.create_order(payload)
-        text = format_order_result(result, slug, outcome, order_type)
+            kwargs["price"] = session.get("trade_price")
+            kwargs["size"] = session.get("trade_size")
+
+        result = await client.place_order(**kwargs)
+        text = format_order_result(result, slug, outcome, order_type, side)
         if query:
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=main_menu_keyboard())
         else:
             await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=main_menu_keyboard())
     except Exception as e:
-        logger.error(f"Order execution error: {e}")
-        error_text = f"❌ Order failed: {str(e)[:200]}"
+        logger.error("Order execution error: %s", e, exc_info=True)
+        error_text = f"Order failed:\n<code>{str(e)[:350]}</code>"
         if query:
-            await query.edit_message_text(error_text, reply_markup=back_keyboard())
+            await query.edit_message_text(error_text, parse_mode=ParseMode.HTML, reply_markup=back_keyboard())
         else:
-            await update.message.reply_text(error_text, reply_markup=back_keyboard())
+            await update.message.reply_text(error_text, parse_mode=ParseMode.HTML, reply_markup=back_keyboard())
