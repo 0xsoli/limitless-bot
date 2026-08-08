@@ -1,61 +1,77 @@
 # Limitless Trading Bot
 
-![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)
-![Base](https://img.shields.io/badge/Base-Chain-0052FF?style=for-the-badge&logo=coinbase&logoColor=white)
-![Telegram](https://img.shields.io/badge/Telegram-Bot-26A5E4?style=for-the-badge&logo=telegram&logoColor=white)
-![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
-![Built for](https://img.shields.io/badge/Built%20for-Limitless%20Exchange-9AB83A?style=for-the-badge)
+[![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![Base](https://img.shields.io/badge/Base-Chain-0052FF?style=for-the-badge&logo=coinbase&logoColor=white)](https://base.org/)
+[![Telegram](https://img.shields.io/badge/Telegram-Bot-26A5E4?style=for-the-badge&logo=telegram&logoColor=white)](https://telegram.org/)
+[![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](./LICENSE)
 
-A community-built Telegram trading bot for [Limitless Exchange](https://limitless.exchange/?r=SoliTeam) — the prediction market on Base. Fully self-hosted, your keys never leave your own server.
+Self-hosted Telegram trading bot for [Limitless Exchange](https://limitless.exchange/?r=SoliTeam) on Base. Browse every market category, place signed CLOB orders, and manage your portfolio — with credentials that never leave your VPS.
 
-> Built by [@solixbt](https://x.com/solixbt) for the Limitless community.
+Built by [@solixbt](https://x.com/solixbt) for the Limitless community.
 
 ---
 
 ## Features
 
-- **Step-by-step Trading Flow** — Markets → Timeframe → Token → Order Type → Size → Confirm
-- **Three Order Types** — GTC (resting limit), FAK (fill-and-kill), FOK (market order)
-- **Real-time Orderbook** — Live updates via WebSocket, no polling
-- **Portfolio Dashboard** — Positions, PnL, trade history, and points
-- **HMAC-SHA256 Auth** — Every request signed per Limitless API spec
-- **Rate Limit Safe** — Enforces 300ms delay and max 2 concurrent requests automatically
-- **Auto-reconnect** — WebSocket drops are recovered with full subscription replay
-- **Systemd Service** — Runs in the background, restarts on failure, survives reboots
+- **Full market catalog** — Crypto, Sport, Esports, Finance, Politics, and every other Limitless navigation category
+- **Categorized browsing** — Category → optional subcategory filters → paginated market list
+- **Buy & sell** — YES / NO for GTC, FAK, and FOK order types
+- **EIP-712 order signing** — Orders are built and signed locally with your wallet key per the official Limitless API
+- **HMAC API auth** — Every authenticated request uses scoped token HMAC-SHA256 signing
+- **Portfolio tools** — Positions, PnL, history, points, cancel-all orders
+- **One-line VPS install** — Interactive installer, systemd service, auto-restart
 
 ---
 
 ## Security
 
-> **Your keys never leave your server.** This bot is fully self-hosted — no third-party service, no cloud relay, no external database.
+> **Your keys never leave your server.** There is no third-party relay, no external database, and no analytics.
 
-- All credentials are stored in `/etc/limitless-bot/config.json` on **your own server** with `chmod 600` (readable only by root)
-- Your private key is used only to derive your wallet address for profile lookups — it is never transmitted to any external service other than the official Limitless API
-- API secrets are stored locally and never logged
-- The bot communicates exclusively with `api.limitless.exchange` and `wss://ws.limitless.exchange`
-- No analytics, no telemetry, no callbacks — open source and fully auditable
+| Item | Detail |
+|------|--------|
+| Config path | `/etc/limitless-bot/config.json` (`chmod 600`) |
+| Private key usage | EIP-712 order signing only (local) |
+| API surface | `api.limitless.exchange` and optional `wss://ws.limitless.exchange` |
+| Access control | Telegram Chat ID allowlist |
 
-If you are concerned about security, review the source code before running. Every credential stays on the machine you control.
+Review the source before running. You control the machine and every credential on it.
 
 ---
 
 ## Prerequisites
 
-- Ubuntu 20.04+ or Debian 11+
+- Ubuntu 20.04+ or Debian 11+ (other Linux distros work with manual install)
+- Root access for the systemd installer
 - Python 3.9+
-- Root access (required for systemd service setup)
-- A [Limitless Exchange](https://limitless.exchange/?r=SoliTeam) account with a scoped API token (`trading` scope)
-- A Telegram bot token from [@BotFather](https://t.me/BotFather)
+- A [Limitless](https://limitless.exchange/?r=SoliTeam) scoped API token with the `trading` scope
+- Wallet private key for the same account (EOA trading mode)
+- Telegram bot token from [@BotFather](https://t.me/BotFather)
+- Your numeric Telegram chat ID from [@userinfobot](https://t.me/userinfobot)
+
+### Trading wallet mode
+
+Self-signed API orders require **EOA** mode on your Limitless profile. If you previously enabled 1-click / smart-wallet trading in the web app, the bot automatically switches the profile to `eoa` on startup via `PUT /profiles`.
+
+### On-chain approvals
+
+Before the first trade on a venue, approve USDC (and Conditional Tokens for sells) to that market’s `venue.exchange` on Base. Approvals are one-time per venue. See the [venue system docs](https://docs.limitless.exchange/developers/venue-system).
 
 ---
 
-## Quick Install
+## Quick install (one line)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/0xsoli/limitless-bot/main/install.sh | sudo bash
 ```
 
-Or clone and run manually:
+The installer will:
+
+1. Install system dependencies and create a Python venv  
+2. Prompt for API token, Telegram credentials, and wallet private key  
+3. Write a locked-down config file  
+4. Install and start a `limitless-bot` systemd service  
+
+### Manual install
 
 ```bash
 git clone https://github.com/0xsoli/limitless-bot.git
@@ -63,71 +79,68 @@ cd limitless-bot
 sudo bash install.sh
 ```
 
-The installer asks for your credentials interactively, saves them securely, and starts the bot as a systemd service.
-
----
-
-## Required Credentials
-
-| Field | Description | Where to get it |
-|---|---|---|
-| Limitless API Key | Token ID from API token derivation | [limitless.exchange](https://limitless.exchange) → Profile → API Tokens |
-| Limitless API Secret | Secret returned once at token creation | Same as above |
-| Telegram Bot Token | Your bot's token from BotFather | [@BotFather](https://t.me/BotFather) → `/newbot` |
-| Telegram Chat ID | Your personal numeric chat ID | [@userinfobot](https://t.me/userinfobot) |
-| Wallet Private Key | Private key of your trading wallet | Your wallet provider |
-
----
-
-## Bot Usage
-
-### Step 1 — Start
-Send `/start` to your bot. The main menu appears.
-
-### Step 2 — Browse Markets
-Tap **📊 Markets** → select a timeframe (**5 Min**, **15 Min**, **Hourly**, **Daily**) → pick any active market from the list.
-
-### Step 3 — View Market
-Each market shows live YES / NO prices, volume, liquidity, and an orderbook snapshot. Tap **Buy YES** or **Buy NO** to trade.
-
-### Step 4 — Place an Order
-Choose your order type:
-- **GTC** — Limit order, rests on the book until filled or cancelled. Enter price and size.
-- **FAK** — Fills what it can immediately, cancels the rest. Enter price and size.
-- **FOK** — Full fill or nothing, executes at market price. Enter USDC amount to spend.
-
-Review the confirmation screen, then tap **Confirm**.
-
-### Step 5 — Portfolio
-Tap **💼 Portfolio** to see your open positions, unrealized PnL, trade history, and accumulated points. Cancel all open orders with one tap.
-
----
-
-## Service Management
+### Reconfigure
 
 ```bash
-# Check status
-sudo systemctl status limitless-bot
+sudo bash /opt/limitless-bot/install.sh --reconfigure
+```
 
-# Live logs
-sudo journalctl -u limitless-bot -f
+Or from a fresh clone:
 
-# Restart
-sudo systemctl restart limitless-bot
-
-# Stop
-sudo systemctl stop limitless-bot
-
-# View error log
-sudo cat /var/log/limitless-bot/error.log
+```bash
+sudo bash install.sh --reconfigure
 ```
 
 ---
 
-## Reconfigure Credentials
+## Credentials
+
+| Field | Description | Source |
+|-------|-------------|--------|
+| Limitless API Key | Scoped token ID | Profile → API Tokens → Derive |
+| Limitless API Secret | Base64 secret (shown once) | Same as above |
+| Telegram Bot Token | Bot auth token | @BotFather → `/newbot` |
+| Telegram Chat ID | Your numeric user ID | @userinfobot |
+| Wallet Private Key | EOA key for EIP-712 signatures | Your wallet (never share this) |
+
+---
+
+## Using the bot
+
+1. Open Telegram and send `/start` to your bot  
+2. Tap **Markets** and pick a category (or **All Markets**)  
+3. Optionally narrow by subcategory filters (duration, league, game, etc.)  
+4. Open a market, then **Buy YES / Buy NO / Sell YES / Sell NO**  
+5. Choose **GTC**, **FAK**, or **FOK**, enter size, confirm  
+
+### Order types
+
+| Type | Behavior |
+|------|----------|
+| **GTC** | Limit order rests until filled or cancelled |
+| **FAK** | Fill available liquidity immediately; cancel remainder |
+| **FOK** | Fill entirely or reject (market-style spend/size) |
+
+### Commands
+
+| Command | Action |
+|---------|--------|
+| `/start` | Welcome + main menu |
+| `/menu` | Main menu |
+| `/market` | Browse markets |
+| `/portfolio` | Portfolio overview |
+| `/order` | Continue order flow for the selected market |
+
+---
+
+## Service management
 
 ```bash
-sudo bash install.sh --reconfigure
+sudo systemctl status limitless-bot
+sudo journalctl -u limitless-bot -f
+sudo systemctl restart limitless-bot
+sudo systemctl stop limitless-bot
+sudo cat /var/log/limitless-bot/error.log
 ```
 
 ---
@@ -142,7 +155,6 @@ sudo systemctl daemon-reload
 sudo rm -rf /opt/limitless-bot
 sudo rm -rf /etc/limitless-bot
 sudo rm -rf /var/log/limitless-bot
-echo "Limitless Bot uninstalled."
 ```
 
 ---
@@ -152,43 +164,44 @@ echo "Limitless Bot uninstalled."
 ```
 limitless-bot/
 ├── bot/
-│   ├── main.py              — App bootstrap and handler registration
-│   ├── config.py            — Config loader (file + env var fallback)
-│   ├── limitless_client.py  — HMAC-signed API client with rate limiting
-│   ├── websocket_manager.py — Socket.IO real-time data manager
-│   ├── handlers.py          — All Telegram command and callback handlers
-│   ├── keyboards.py         — Inline keyboard layouts
-│   └── formatters.py        — Message text formatters
-├── run.py                   — Entry point
-├── requirements.txt         — Python dependencies
-└── install.sh               — One-line installer with systemd setup
+│   ├── main.py              App bootstrap and handler registration
+│   ├── config.py            Config load (file + env fallback)
+│   ├── limitless_client.py  HMAC client, market APIs, EIP-712 orders
+│   ├── websocket_manager.py Optional real-time Socket.IO helper
+│   ├── handlers.py          Telegram commands and callbacks
+│   ├── keyboards.py         Inline keyboards
+│   └── formatters.py        Message formatting
+├── run.py                   Entry point
+├── requirements.txt
+└── install.sh               One-line installer + systemd unit
 ```
 
----
+### Order flow (critical path)
 
-## API Details
+1. `GET /profiles/me` → `ownerId`, `rank.feeRateBps`, trading wallet mode  
+2. `GET /markets/{slug}` → `tokens.yes` / `tokens.no`, `venue.exchange`, fee flag  
+3. Build order amounts (1e6 scale) per GTC / FAK / FOK rules  
+4. EIP-712 sign with domain `Limitless CTF Exchange` / chainId `8453` / `verifyingContract = venue.exchange`  
+5. `POST /orders` with signed `order`, `ownerId`, `orderType`, `marketSlug`
 
-All requests to `api.limitless.exchange` use HMAC-SHA256 signing:
+Authentication on each request:
 
 ```
 message   = {ISO-8601 timestamp}\n{METHOD}\n{path+query}\n{body}
-signature = base64( HMAC-SHA256( base64decode(secret), message ) )
+signature = base64(HMAC-SHA256(base64decode(secret), message))
+headers   = lmts-api-key, lmts-timestamp, lmts-signature
 ```
-
-Headers on every authenticated request: `lmts-api-key`, `lmts-timestamp`, `lmts-signature`
-
-Rate limits enforced automatically: max 2 concurrent requests, minimum 300ms between calls, exponential backoff on 429.
 
 ---
 
 ## Disclaimer
 
-This project is not affiliated with Limitless Exchange. It is an independent, community-built tool created for the Limitless community by [@solixbt](https://x.com/solixbt).
+This project is **not affiliated** with Limitless Exchange. It is an independent community tool.
 
-**This is not financial advice.** Trading prediction markets involves risk. Always review orders before confirming. The author is not responsible for any financial losses resulting from use of this software.
+**Not financial advice.** Prediction markets involve risk of loss. You are solely responsible for keys, approvals, balances, and orders you submit.
 
 ---
 
 ## License
 
-MIT — free to use, modify, and distribute.
+MIT
